@@ -4,8 +4,7 @@ Tags: wordpress chat, internal messaging, frontend chat, role permissions, group
 Requires at least: 6.5
 Requires PHP: 8.1
 Stable tag: 1.0.0
-License: GPLv2 or later
-License URI: https://www.gnu.org/licenses/gpl-2.0.html
+License: MIT
 
 Secure Telegram-inspired WordPress messaging with directional role permissions, direct/group chat, contacts, moderation and a frontend widget.
 
