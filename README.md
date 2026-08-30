@@ -216,4 +216,4 @@ RoleChat is designed for authenticated WordPress users. It does not create an an
 
 ## License
 
-GPL-2.0-or-later.
+MIT
