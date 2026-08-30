@@ -9,6 +9,7 @@
  * Author:            Shahin Ilderemi
  * Author URI:        https://ildrm.com
  * License:           MIT
+ * License URI:       https://opensource.org/license/mit
  * Text Domain:       rolechat-messenger
  * Domain Path:       /languages
  */
