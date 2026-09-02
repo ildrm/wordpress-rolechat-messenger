@@ -3,7 +3,7 @@
  * Plugin Name:       RoleChat Messenger
  * Plugin URI:        https://github.com/ildrm/wordpress-rolechat-messenger
  * Description:       Secure Telegram-inspired internal and frontend messaging for WordPress with directional role permissions, direct/group chat, contacts, attachments, moderation, and a frontend support widget.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Requires at least: 6.5
  * Requires PHP:      8.1
  * Author:            Shahin Ilderemi
@@ -16,8 +16,8 @@
 
 defined( 'ABSPATH' ) || exit;
 
-define( 'RCM_VERSION', '1.0.0' );
-define( 'RCM_DB_VERSION', '1.0.0' );
+define( 'RCM_VERSION', '1.0.1' );
+define( 'RCM_DB_VERSION', '1.1.0' );
 define( 'RCM_FILE', __FILE__ );
 define( 'RCM_DIR', plugin_dir_path( __FILE__ ) );
 define( 'RCM_URL', plugin_dir_url( __FILE__ ) );
@@ -64,6 +64,7 @@ final class RCM_Plugin {
 			RCM_Activator::install_schema();
 			update_option( 'rcm_db_version', RCM_DB_VERSION, false );
 		}
+		RCM_Activator::ensure_cleanup_schedule();
 	}
 }
 

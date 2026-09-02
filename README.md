@@ -146,6 +146,8 @@ The frontend and wp-admin applications use the same REST API, database and autho
 - Authenticated, nonce-protected attachment streaming
 - Configurable upload size limit
 - Attachment-to-conversation authorization before upload
+- Pending-upload binding to the conversation that authorized it
+- Separate message, upload, report, and group-creation abuse limits
 - Orphan upload cleanup
 - No trust in hidden/disabled frontend controls
 - No public message endpoints
@@ -158,6 +160,7 @@ The frontend and wp-admin applications use the same REST API, database and autho
 - Daily cleanup task
 - Chat-owned media cleanup when retained messages are removed
 - Orphan chat attachment cleanup after 24 hours
+- Continuation batches when a cleanup backlog exceeds one cron run
 - Optional complete data removal on uninstall
 
 ## Database model
@@ -201,6 +204,7 @@ The bundled version uses authenticated REST polling by default for broad hosting
 - Configure the role matrix using least privilege.
 - Avoid enabling administrator conversation inspection unless there is a defined moderation/compliance need.
 - Use object caching on high-volume WordPress installations.
+- Use InnoDB for the RoleChat tables so cleanup and group-owner changes retain transactional guarantees.
 - For very high chat throughput, replace polling with a dedicated WebSocket/SSE transport and perform load testing for the specific hosting stack.
 
 ## Requirements
@@ -213,6 +217,20 @@ The bundled version uses authenticated REST polling by default for broad hosting
 ## Notes
 
 RoleChat is designed for authenticated WordPress users. It does not create an anonymous guest-chat identity system. Subscribers/customers can use the frontend widget when their role is enabled.
+
+Network-wide multisite activation initializes RoleChat independently for every site. Settings and table/file deletion are site-scoped; because WordPress user metadata is network-global, full uninstall removes RoleChat user metadata only when every installed RoleChat site opted into full data deletion.
+
+## Development and QA
+
+The completed source/product/process review and corrected finding list are recorded in [`AUDIT.md`](AUDIT.md).
+
+Run the committed regression suite with:
+
+```bash
+php tests/run.php
+```
+
+Before a release, also lint every PHP file, run `node --check` on all three JavaScript bundles, and perform the staging checks in `TESTING.md`. GitHub Actions runs the syntax and regression checks on PHP 8.1 and 8.4 for pushes and pull requests.
 
 ## License
 

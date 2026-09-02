@@ -12,18 +12,21 @@ final class RCM_Attachments {
 
 	public static function storage_dir(): string {
 		$uploads = wp_upload_dir( null, false );
+		if ( ! empty( $uploads['error'] ) || empty( $uploads['basedir'] ) ) {
+			return '';
+		}
 		return trailingslashit( $uploads['basedir'] ) . 'rolechat-secure';
 	}
 
 	public static function ensure_storage_dir(): bool {
 		$dir = self::storage_dir();
-		if ( ! wp_mkdir_p( $dir ) ) {
+		if ( '' === $dir || ( ! is_dir( $dir ) && ! wp_mkdir_p( $dir ) ) ) {
 			return false;
 		}
 
 		$files = array(
 			'index.php'   => "<?php\n// Silence is golden.\n",
-			'.htaccess'   => "Deny from all\n",
+			'.htaccess'   => "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nDeny from all\n</IfModule>\n",
 			'web.config'  => "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<configuration><system.webServer><authorization><deny users=\"*\" /></authorization></system.webServer></configuration>\n",
 		);
 		foreach ( $files as $name => $contents ) {
@@ -40,7 +43,12 @@ final class RCM_Attachments {
 	}
 
 	public static function path( string $storage_key ): string {
-		return trailingslashit( self::storage_dir() ) . preg_replace( '/[^a-f0-9]/', '', strtolower( $storage_key ) ) . '.rcm';
+		$storage_key = strtolower( $storage_key );
+		$dir         = self::storage_dir();
+		if ( '' === $dir || 1 !== preg_match( '/^[a-f0-9]{48}$/', $storage_key ) ) {
+			return '';
+		}
+		return trailingslashit( $dir ) . $storage_key . '.rcm';
 	}
 
 	private static function key( string $storage_key ): string {
@@ -49,6 +57,24 @@ final class RCM_Attachments {
 			throw new RuntimeException( 'attachment_secret_unavailable' );
 		}
 		return hash_hmac( 'sha256', $storage_key, $secret, true );
+	}
+
+	/**
+	 * Write every byte to a stream, including when fwrite() performs a partial write.
+	 *
+	 * @param resource $stream Writable stream.
+	 */
+	private static function write_all( $stream, string $data ): bool {
+		$offset = 0;
+		$length = strlen( $data );
+		while ( $offset < $length ) {
+			$written = fwrite( $stream, substr( $data, $offset ) );
+			if ( false === $written || 0 === $written ) {
+				return false;
+			}
+			$offset += $written;
+		}
+		return true;
 	}
 
 	public static function encrypt_uploaded_file( string $tmp_path, string $storage_key ): bool|WP_Error {
@@ -63,6 +89,10 @@ final class RCM_Attachments {
 			return new WP_Error( 'rcm_upload_read_failed', __( 'The uploaded file could not be read.', 'rolechat-messenger' ) );
 		}
 		$path = self::path( $storage_key );
+		if ( '' === $path ) {
+			fclose( $in );
+			return new WP_Error( 'rcm_storage_key_invalid', __( 'The attachment storage key is invalid.', 'rolechat-messenger' ) );
+		}
 		$out  = @fopen( $path, 'wb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		if ( ! $out ) {
 			fclose( $in );
@@ -72,7 +102,9 @@ final class RCM_Attachments {
 		try {
 			$key = self::key( $storage_key );
 			list( $state, $header ) = sodium_crypto_secretstream_xchacha20poly1305_init_push( $key );
-			fwrite( $out, $header );
+			if ( ! self::write_all( $out, $header ) ) {
+				throw new RuntimeException( 'write_failed' );
+			}
 			while ( true ) {
 				$chunk = fread( $in, self::CHUNK_SIZE );
 				if ( false === $chunk ) {
@@ -84,8 +116,9 @@ final class RCM_Attachments {
 				}
 				$tag    = $final ? SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL : SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_MESSAGE;
 				$cipher = sodium_crypto_secretstream_xchacha20poly1305_push( $state, $chunk, '', $tag );
-				fwrite( $out, pack( 'N', strlen( $cipher ) ) );
-				fwrite( $out, $cipher );
+				if ( ! self::write_all( $out, pack( 'N', strlen( $cipher ) ) ) || ! self::write_all( $out, $cipher ) ) {
+					throw new RuntimeException( 'write_failed' );
+				}
 				if ( $final ) {
 					break;
 				}
@@ -102,19 +135,33 @@ final class RCM_Attachments {
 		return true;
 	}
 
-	public static function stream_decrypted( string $storage_key ): bool {
+	/**
+	 * Authenticate an entire encrypted file before exposing any plaintext.
+	 *
+	 * @return resource|false A rewound temporary plaintext stream, or false on failure.
+	 */
+	public static function decrypted_stream( string $storage_key ) {
 		if ( ! self::encryption_available() ) {
 			return false;
 		}
 		$path = self::path( $storage_key );
+		if ( '' === $path ) {
+			return false;
+		}
 		$in   = @fopen( $path, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		if ( ! $in ) {
+			return false;
+		}
+		$out = @fopen( 'php://temp/maxmemory:5242880', 'w+b' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
+		if ( ! $out ) {
+			fclose( $in );
 			return false;
 		}
 		$header_bytes = SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_HEADERBYTES;
 		$header       = fread( $in, $header_bytes );
 		if ( false === $header || strlen( $header ) !== $header_bytes ) {
 			fclose( $in );
+			fclose( $out );
 			return false;
 		}
 		try {
@@ -146,23 +193,44 @@ final class RCM_Attachments {
 					throw new RuntimeException( 'authentication_failed' );
 				}
 				list( $plain, $tag ) = $result;
-				echo $plain; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- Binary authenticated file stream.
+				if ( ! self::write_all( $out, $plain ) ) {
+					throw new RuntimeException( 'write_failed' );
+				}
 				if ( SODIUM_CRYPTO_SECRETSTREAM_XCHACHA20POLY1305_TAG_FINAL === $tag ) {
 					$final_seen = true;
+					$trailing = fread( $in, 1 );
+					if ( false === $trailing || '' !== $trailing ) {
+						throw new RuntimeException( 'trailing_data' );
+					}
 					break;
 				}
 			}
 			fclose( $in );
-			return $final_seen;
+			if ( ! $final_seen || ! rewind( $out ) ) {
+				fclose( $out );
+				return false;
+			}
+			return $out;
 		} catch ( Throwable $e ) {
 			fclose( $in );
+			fclose( $out );
 			return false;
 		}
 	}
 
+	public static function stream_decrypted( string $storage_key ): bool {
+		$stream = self::decrypted_stream( $storage_key );
+		if ( false === $stream ) {
+			return false;
+		}
+		$result = fpassthru( $stream );
+		fclose( $stream );
+		return false !== $result;
+	}
+
 	public static function delete_storage( string $storage_key ): void {
 		$path = self::path( $storage_key );
-		if ( is_file( $path ) ) {
+		if ( '' !== $path && is_file( $path ) ) {
 			@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged
 		}
 	}

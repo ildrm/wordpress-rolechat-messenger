@@ -7,16 +7,18 @@
     const close = widget?.querySelector('.rcm-widget-close');
     const root = document.getElementById('rcm-frontend-app');
     if (!widget || !toggle || !panel || !root || !window.RoleChatApp) return;
-    let started = true;
-    let app = new window.RoleChatApp(root, { mode: 'frontend' });
+	const app = new window.RoleChatApp(root, { mode: 'frontend', isVisible: () => !panel.hidden && !document.hidden });
     app.init();
     window.RoleChatFrontendApp = app;
-    function openWidget() {
+	async function openWidget() {
       panel.hidden = false;
       toggle.setAttribute('aria-expanded', 'true');
       widget.classList.add('is-open');
+	  await app.refreshConversations();
+	  if (app.state.activeConversationId) await app.fetchMessages(false, true);
     }
     function closeWidget() {
+	  app.stopTyping();
       panel.hidden = true;
       toggle.setAttribute('aria-expanded', 'false');
       widget.classList.remove('is-open');

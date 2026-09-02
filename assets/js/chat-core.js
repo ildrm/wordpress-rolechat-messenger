@@ -60,13 +60,21 @@
         pendingAttachments: [],
         loadingMessages: false,
         search: '',
-        lastNotifiedMessageId: 0,
       };
+	  this.isVisible = typeof options.isVisible === 'function' ? options.isVisible : () => !document.hidden;
       this.poller = null;
       this.presenceTimer = null;
       this.typingTimer = null;
       this.typingStopTimer = null;
       this.lastTypingPing = 0;
+	  this.messageRequestToken = 0;
+	  this.messagesLoadingFor = 0;
+	  this.conversationRequestToken = 0;
+	  this.userSearchRequestToken = 0;
+	  this.messageSearchRequestToken = 0;
+	  this.pollInFlight = false;
+	  this.sending = false;
+	  this.notifiedThrough = new Map();
       this.bound = false;
     }
 
@@ -124,13 +132,13 @@
               </div>
               <div class="rcm-head-actions">
                 <button type="button" class="rcm-icon-btn" data-action="new-chat" title="${esc(labels.newChat || 'New chat')}">＋</button>
-                ${this.state.features.browser_notifications ? `<button type="button" class="rcm-icon-btn" data-action="request-notifications" title="Notifications">♢</button>` : ''}
+                ${this.state.features.browser_notifications ? `<button type="button" class="rcm-icon-btn" data-action="request-notifications" title="${esc(labels.notifications || 'Notifications')}">♢</button>` : ''}
                 ${this.state.features.can_create_group ? `<button type="button" class="rcm-icon-btn" data-action="new-group" title="${esc(labels.newGroup || 'New group')}">◫</button>` : ''}
               </div>
             </div>
             <div class="rcm-search-box"><span>⌕</span><input type="search" data-role="conversation-search" placeholder="${esc(labels.search || 'Search')}"></div>
             <nav class="rcm-nav-tabs">
-              <button type="button" data-view="chats" class="is-active">Chats</button>
+              <button type="button" data-view="chats" class="is-active">${esc(labels.chats || 'Chats')}</button>
               <button type="button" data-view="contacts">${esc(labels.contacts || 'Contacts')}</button>
               <button type="button" data-view="archived">${esc(labels.archived || 'Archived')}</button>
             </nav>
@@ -154,7 +162,7 @@
     }
 
     async handleClick(event) {
-      const target = event.target.closest('[data-action], [data-conversation-id], [data-contact-user], [data-view]');
+	  const target = event.target.closest('[data-action], [data-conversation-id], [data-contact-user], [data-message-jump], [data-view]');
       if (!target) return;
 
       if (target.dataset.view) {
@@ -186,12 +194,21 @@
         return;
       }
 
+	  if (target.dataset.messageJump) {
+		const messageId = Number(target.dataset.messageJump);
+		const message = this.root.querySelector(`[data-message-id="${messageId}"]`);
+		if (message) message.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		else this.toast('Load earlier history to view the replied-to message.', 'info');
+		return;
+	  }
+
       const action = target.dataset.action;
       switch (action) {
         case 'new-chat': this.openUserPicker(false); break;
         case 'new-group': this.openUserPicker(true); break;
         case 'close-modal': this.closeModal(); break;
-        case 'back-list': this.root.classList.remove('rcm-has-active-chat'); this.state.activeConversationId = 0; this.renderEmpty(); break;
+		case 'back-list': this.stopTyping(); this.messageRequestToken++; this.messagesLoadingFor = 0; this.state.loadingMessages = false; this.root.classList.remove('rcm-has-active-chat'); this.state.activeConversationId = 0; this.state.replyTo = null; this.state.pendingAttachments = []; this.renderEmpty(); break;
+		case 'load-more': await this.fetchMessages(true, false); break;
         case 'send-message': await this.sendMessage(); break;
         case 'attach': this.root.querySelector('[data-role="attachment-input"]')?.click(); break;
         case 'cancel-reply': this.state.replyTo = null; this.renderComposerState(); break;
@@ -242,6 +259,11 @@
     }
 
     handleKeydown(event) {
+	  if (event.key === 'Escape' && this.root.querySelector('[data-role="modal-layer"]')?.classList.contains('is-open')) {
+		event.preventDefault();
+		this.closeModal();
+		return;
+	  }
       if (event.target.matches('[data-role="composer"]') && event.key === 'Enter' && !event.shiftKey) {
         event.preventDefault();
         this.sendMessage();
@@ -287,7 +309,7 @@
 
       host.innerHTML = conversations.map(c => {
         const active = c.id === this.state.activeConversationId ? 'is-active' : '';
-        const typing = c.typing && c.typing.length ? `${esc(c.typing[0].name)} ${esc(labels.typing || 'typing…')}` : '';
+		const typing = c.typing && c.typing.length ? `${c.typing[0].name || ''} ${labels.typing || 'typing…'}` : '';
         const preview = typing || (c.last_message?.content || '');
         return `<button type="button" class="rcm-conversation ${active}" data-conversation-id="${Number(c.id)}">
           <span class="rcm-conv-avatar">${this.avatarHtml({ name: c.title, avatar: c.avatar }, 'md')}${this.conversationPresenceDot(c)}</span>
@@ -297,14 +319,14 @@
     }
 
     renderContacts(host, q) {
-      const categories = [{ id: 0, name: 'All contacts' }, ...this.state.categories];
-      let html = `<div class="rcm-contacts-toolbar"><button type="button" class="rcm-text-btn" data-action="new-chat">＋ ${esc(labels.newChat || 'New chat')}</button><button type="button" class="rcm-text-btn" data-action="create-category">＋ Category</button></div>`;
+      const categories = [{ id: 0, name: labels.allContacts || 'All contacts' }, ...this.state.categories];
+      let html = `<div class="rcm-contacts-toolbar"><button type="button" class="rcm-text-btn" data-action="new-chat">＋ ${esc(labels.newChat || 'New chat')}</button><button type="button" class="rcm-text-btn" data-action="create-category">＋ ${esc(labels.category || 'Category')}</button></div>`;
       categories.forEach(category => {
         let contacts = this.state.contacts.filter(c => category.id === 0 || Number(c.category_id) === Number(category.id));
         if (q) contacts = contacts.filter(c => String(c.name || '').toLowerCase().includes(q));
         if (!contacts.length && category.id !== 0) return;
         html += `<div class="rcm-contact-group"><div class="rcm-contact-group-title"><strong>${esc(category.name)}</strong>${category.id ? `<span class="rcm-category-actions"><button type="button" data-action="rename-category" data-category-id="${Number(category.id)}" aria-label="Rename category">✎</button><button type="button" data-action="delete-category" data-category-id="${Number(category.id)}" aria-label="Delete category">×</button></span>` : ''}</div>`;
-        html += contacts.length ? contacts.map(contact => `<button type="button" class="rcm-contact-row" data-contact-user="${Number(contact.id)}">${this.avatarHtml(contact, 'sm')}<span><strong>${esc(contact.name)}</strong><small>${esc(this.userSecondary(contact))}</small></span></button>`).join('') : `<div class="rcm-mini-empty">No contacts</div>`;
+        html += contacts.length ? contacts.map(contact => `<button type="button" class="rcm-contact-row" data-contact-user="${Number(contact.id)}">${this.avatarHtml(contact, 'sm')}<span><strong>${esc(contact.name)}</strong><small>${esc(this.userSecondary(contact))}</small></span></button>`).join('') : `<div class="rcm-mini-empty">${esc(labels.noContacts || 'No contacts')}</div>`;
         html += '</div>';
       });
       host.innerHTML = html;
@@ -318,6 +340,11 @@
     }
 
     async openConversation(id) {
+	  if (Number(this.state.activeConversationId) !== Number(id)) {
+		this.stopTyping();
+		this.state.replyTo = null;
+		this.state.pendingAttachments = [];
+	  }
       this.state.activeConversationId = id;
       this.root.classList.add('rcm-has-active-chat');
       this.renderSidebar();
@@ -343,7 +370,7 @@
           </div>
         </header>
         <div class="rcm-messages-wrap">
-          <button type="button" class="rcm-load-more" data-action="load-more" hidden>Load earlier messages</button>
+          <button type="button" class="rcm-load-more" data-action="load-more" hidden>${esc(labels.loadEarlier || 'Load earlier messages')}</button>
           <div class="rcm-messages" data-role="messages"><div class="rcm-message-loader"><span class="rcm-spinner"></span></div></div>
           <div class="rcm-typing-line" data-role="typing-line"></div>
         </div>
@@ -364,18 +391,22 @@
 
     async fetchMessages(older = false, initial = false) {
       const id = this.state.activeConversationId;
-      if (!id || this.state.loadingMessages) return;
+	  if (!id || Number(this.messagesLoadingFor) === Number(id)) return;
+	  const requestToken = ++this.messageRequestToken;
+	  this.messagesLoadingFor = id;
       this.state.loadingMessages = true;
       try {
         const before = older && this.state.messages.length ? this.state.messages[0].id : 0;
         const data = await this.api(`conversations/${id}/messages?limit=50${before ? `&before_id=${before}` : ''}`);
+		if (requestToken !== this.messageRequestToken || Number(this.state.activeConversationId) !== Number(id)) return;
         const incoming = data.messages || [];
         if (older) {
           const known = new Set(this.state.messages.map(m => m.id));
           this.state.messages = [...incoming.filter(m => !known.has(m.id)), ...this.state.messages];
         } else {
           const previousMax = this.state.messages.length ? Math.max(...this.state.messages.map(m => m.id)) : 0;
-          const newForeign = incoming.filter(m => m.id > previousMax && !m.own);
+		  const notifiedThrough = Number(this.notifiedThrough.get(Number(id)) || 0);
+		  const newForeign = incoming.filter(m => m.id > previousMax && m.id > notifiedThrough && !m.own);
           if (initial || !this.state.messages.length) {
             this.state.messages = incoming;
           } else {
@@ -389,11 +420,22 @@
         this.renderMessages(older);
         this.renderTyping(data.typing || []);
         const maxId = this.state.messages.length ? Math.max(...this.state.messages.map(m => m.id)) : 0;
-        if (maxId) await this.api(`conversations/${id}/read`, { method: 'POST', body: { message_id: maxId } });
+		if (maxId && this.isVisible()) {
+		  await this.api(`conversations/${id}/read`, { method: 'POST', body: { message_id: maxId } });
+		  if (requestToken === this.messageRequestToken && Number(this.state.activeConversationId) === Number(id)) {
+			const conversation = this.activeConversation();
+			if (conversation) conversation.unread = 0;
+			this.renderSidebar();
+			this.emitUnread();
+		  }
+		}
       } catch (error) {
-        this.toast(error.message, 'error');
+		if (requestToken === this.messageRequestToken) this.toast(error.message, 'error');
       } finally {
-        this.state.loadingMessages = false;
+		if (requestToken === this.messageRequestToken) {
+		  this.messagesLoadingFor = 0;
+		  this.state.loadingMessages = false;
+		}
       }
     }
 
@@ -402,7 +444,7 @@
       if (!host) return;
       const oldHeight = host.scrollHeight;
       if (!this.state.messages.length) {
-        host.innerHTML = `<div class="rcm-chat-empty"><span>✦</span><p>No messages yet. Start the conversation.</p></div>`;
+        host.innerHTML = `<div class="rcm-chat-empty"><span>✦</span><p>${esc(labels.noMessages || 'No messages yet. Start the conversation.')}</p></div>`;
       } else {
         let lastDate = '';
         host.innerHTML = this.state.messages.map(message => {
@@ -440,7 +482,7 @@
       const actions = `<div class="rcm-message-actions">
         ${this.state.features.reactions ? `<button type="button" data-action="reaction-menu" data-message-id="${message.id}" title="React">☺</button>` : ''}
         <button type="button" data-action="reply" data-message-id="${message.id}" title="${esc(labels.reply || 'Reply')}">↩</button>
-        ${this.state.features.forward ? `<button type="button" data-action="forward" data-message-id="${message.id}" title="Forward">➜</button>` : ''}
+        ${this.state.features.forward ? `<button type="button" data-action="forward" data-message-id="${message.id}" title="${esc(labels.forward || 'Forward')}">➜</button>` : ''}
         ${message.own && this.state.features.edit ? `<button type="button" data-action="edit" data-message-id="${message.id}" title="${esc(labels.edit || 'Edit')}">✎</button>` : ''}
         ${message.own && this.state.features.delete ? `<button type="button" data-action="delete" data-message-id="${message.id}" title="${esc(labels.delete || 'Delete')}">×</button>` : ''}
         ${!message.own ? `<button type="button" data-action="report" data-message-id="${message.id}" title="${esc(labels.report || 'Report')}">!</button>` : ''}
@@ -471,54 +513,70 @@
     async sendMessage() {
       const c = this.activeConversation();
       const input = this.root.querySelector('[data-role="composer"]');
-      if (!c || !input) return;
+	  if (!c || !input || this.sending) return;
       const content = input.value.trim();
       if (!content && !this.state.pendingAttachments.length) return;
+	  if (this.state.pendingAttachments.some(attachment => attachment.uploading)) {
+		this.toast(labels.waitForUploads || 'Please wait for attachments to finish uploading.', 'info');
+		return;
+	  }
+	  const conversationId = Number(c.id);
+	  const attachmentIds = this.state.pendingAttachments.map(attachment => Number(attachment.id)).filter(Number.isInteger);
       const button = this.root.querySelector('[data-action="send-message"]');
+	  this.sending = true;
       if (button) button.disabled = true;
       try {
-        const data = await this.api(`conversations/${c.id}/messages`, {
+		const data = await this.api(`conversations/${conversationId}/messages`, {
           method: 'POST',
           body: {
             content,
             reply_to_id: this.state.replyTo?.id || 0,
-            attachment_ids: this.state.pendingAttachments.map(a => a.id),
+			attachment_ids: attachmentIds,
           },
         });
-        input.value = '';
-        this.resizeComposer(input);
-        this.state.replyTo = null;
-        this.state.pendingAttachments = [];
-        this.renderComposerState();
-        if (data.message) {
-          this.state.messages.push(data.message);
-          this.renderMessages();
-        }
-        this.stopTyping();
+		if (Number(this.state.activeConversationId) === conversationId) {
+		  input.value = '';
+		  this.resizeComposer(input);
+		  this.state.replyTo = null;
+		  this.state.pendingAttachments = [];
+		  this.renderComposerState();
+		  if (data.message) {
+			const index = this.state.messages.findIndex(message => Number(message.id) === Number(data.message.id));
+			if (index >= 0) this.state.messages[index] = data.message;
+			else this.state.messages.push(data.message);
+			this.renderMessages();
+		  }
+		}
+		this.stopTyping(conversationId);
         await this.refreshConversations();
       } catch (error) {
         this.toast(error.message, 'error');
       } finally {
+		this.sending = false;
         if (button) button.disabled = false;
       }
     }
 
     async uploadAttachment(file) {
+	  const conversationId = Number(this.state.activeConversationId || 0);
+	  if (!conversationId) return;
       const max = Number(this.state.limits.max_attachment_mb || 10) * 1024 * 1024;
       if (file.size > max) {
         this.toast(`File exceeds ${this.state.limits.max_attachment_mb || 10} MB.`, 'error');
         return;
       }
       const tempId = 'upload-' + Math.random().toString(36).slice(2);
-      this.state.pendingAttachments.push({ id: tempId, name: file.name, uploading: true });
+	  this.state.pendingAttachments.push({ id: tempId, name: file.name, uploading: true, conversationId });
       this.renderComposerState();
       try {
         const form = new FormData();
         form.append('file', file, file.name);
-        form.append('conversation_id', String(this.state.activeConversationId || 0));
+		form.append('conversation_id', String(conversationId));
         const data = await this.api('upload', { method: 'POST', body: form });
         this.state.pendingAttachments = this.state.pendingAttachments.filter(a => a.id !== tempId);
-        if (data.attachment) this.state.pendingAttachments.push(data.attachment);
+		if (data.attachment && Number(this.state.activeConversationId) === conversationId) {
+		  this.state.pendingAttachments.push(Object.assign({}, data.attachment, { conversationId }));
+		}
       } catch (error) {
         this.state.pendingAttachments = this.state.pendingAttachments.filter(a => a.id !== tempId);
         this.toast(error.message, 'error');
@@ -539,7 +597,7 @@
       }
       const pending = this.root.querySelector('[data-role="pending-attachments"]');
       if (pending) {
-        pending.innerHTML = this.state.pendingAttachments.map(a => `<div class="rcm-pending-file ${a.uploading ? 'is-uploading' : ''}"><span>${a.uploading ? '<i class="rcm-spinner"></i>' : '▧'}</span><strong>${esc(a.name || 'Attachment')}</strong>${!a.uploading ? `<button type="button" data-action="remove-pending-attachment" data-attachment-id="${Number(a.id)}">×</button>` : ''}</div>`).join('');
+        pending.innerHTML = this.state.pendingAttachments.map(a => `<div class="rcm-pending-file ${a.uploading ? 'is-uploading' : ''}"><span>${a.uploading ? '<i class="rcm-spinner"></i>' : '▧'}</span><strong>${esc(a.name || labels.attachment || 'Attachment')}</strong>${!a.uploading ? `<button type="button" data-action="remove-pending-attachment" data-attachment-id="${Number(a.id)}">×</button>` : ''}</div>`).join('');
       }
     }
 
@@ -607,15 +665,29 @@
     }
 
     async refreshConversations() {
+	  const requestToken = ++this.conversationRequestToken;
       try {
         const previous = new Map(this.state.conversations.map(c => [Number(c.id), Number(c.last_message_id || 0)]));
         const data = await this.api('conversations');
+		if (requestToken !== this.conversationRequestToken) return;
         const incoming = data.conversations || [];
+		const visibleActiveId = this.isVisible() ? Number(this.state.activeConversationId) : 0;
         const changedInactive = incoming.filter(c => {
           const oldId = previous.get(Number(c.id)) || 0;
-          return Number(c.id) !== Number(this.state.activeConversationId) && Number(c.last_message_id || 0) > oldId && Number(c.last_message?.sender_id || 0) !== Number(this.state.user?.id) && Number(c.unread || 0) > 0;
+		  return Number(c.id) !== visibleActiveId && Number(c.last_message_id || 0) > oldId && Number(c.last_message?.sender_id || 0) !== Number(this.state.user?.id) && Number(c.unread || 0) > 0;
         });
         this.state.conversations = incoming;
+		if (this.state.activeConversationId && !this.activeConversation()) {
+		  this.messageRequestToken++;
+		  this.messagesLoadingFor = 0;
+		  this.state.loadingMessages = false;
+		  this.state.activeConversationId = 0;
+		  this.state.messages = [];
+		  this.state.replyTo = null;
+		  this.state.pendingAttachments = [];
+		  this.root.classList.remove('rcm-has-active-chat');
+		  this.renderEmpty();
+		}
         this.renderSidebar();
         const active = this.activeConversation();
         if (active) this.renderTyping(active.typing || []);
@@ -627,9 +699,14 @@
     startPolling() {
       const interval = Math.max(2000, Number(cfg.pollInterval || this.state.limits.poll_interval_ms || 3500));
       this.poller = window.setInterval(async () => {
-        if (document.hidden) return;
-        await this.refreshConversations();
-        if (this.state.activeConversationId) await this.fetchMessages(false, false);
+		if (this.pollInFlight) return;
+		this.pollInFlight = true;
+		try {
+		  await this.refreshConversations();
+		  if (this.state.activeConversationId && this.isVisible()) await this.fetchMessages(false, false);
+		} finally {
+		  this.pollInFlight = false;
+		}
       }, interval);
     }
 
@@ -651,10 +728,10 @@
       this.typingStopTimer = setTimeout(() => this.stopTyping(), 3500);
     }
 
-    stopTyping() {
+	stopTyping(conversationId = this.state.activeConversationId) {
       clearTimeout(this.typingStopTimer);
-      if (!this.state.activeConversationId) return;
-      this.api(`conversations/${this.state.activeConversationId}/typing`, { method: 'POST', body: { typing: false } }).catch(() => {});
+	  if (!conversationId) return;
+	  this.api(`conversations/${conversationId}/typing`, { method: 'POST', body: { typing: false } }).catch(() => {});
     }
 
     activeConversation() {
@@ -720,12 +797,14 @@
       const title = groupMode ? (labels.newGroup || 'New group') : (labels.newChat || 'New chat');
       const layer = this.root.querySelector('[data-role="modal-layer"]');
       if (!layer) return;
+	  this.userSearchRequestToken++;
+	  delete layer.dataset.addToGroup;
       layer.innerHTML = `<div class="rcm-modal-backdrop" data-action="close-modal"></div><section class="rcm-modal" role="dialog" aria-modal="true">
         <header><div><h3>${esc(title)}</h3><p>${groupMode ? 'Choose participants permitted by the role matrix.' : 'Only users you are permitted to contact are listed.'}</p></div><button type="button" data-action="close-modal">×</button></header>
         ${groupMode ? `<label class="rcm-modal-field"><span>Group name</span><input type="text" data-role="group-title" maxlength="190" placeholder="Editorial Team"></label>` : ''}
         <div class="rcm-search-box rcm-modal-search"><span>⌕</span><input type="search" data-role="user-search" placeholder="Search users…" autofocus></div>
         <div class="rcm-user-picker-list" data-role="user-picker-list"><div class="rcm-message-loader"><span class="rcm-spinner"></span></div></div>
-        ${groupMode ? `<footer><span data-role="group-selection-count">0 selected</span><button type="button" class="rcm-primary-btn" data-role="create-group-btn" disabled>Create group</button></footer>` : ''}
+        ${groupMode ? `<footer><span data-role="group-selection-count">0 selected</span><button type="button" class="rcm-primary-btn" data-role="create-group-btn" disabled>${esc(labels.createGroup || 'Create group')}</button></footer>` : ''}
       </section>`;
       layer.classList.add('is-open');
       layer.dataset.groupMode = groupMode ? '1' : '0';
@@ -740,12 +819,20 @@
       const layer = this.root.querySelector('[data-role="modal-layer"]');
       const list = layer?.querySelector('[data-role="user-picker-list"]');
       if (!list) return;
+	  const requestToken = ++this.userSearchRequestToken;
       list.innerHTML = `<div class="rcm-message-loader"><span class="rcm-spinner"></span></div>`;
       try {
         const data = await this.api(`users?limit=40&search=${encodeURIComponent(search || '')}`);
-        const users = data.users || [];
+		if (requestToken !== this.userSearchRequestToken || !list.isConnected) return;
+		let users = data.users || [];
+		const addToGroup = Number(layer.dataset.addToGroup || 0);
+		if (addToGroup) {
+		  const conversation = this.state.conversations.find(item => Number(item.id) === addToGroup);
+		  const existingMembers = new Set((conversation?.members || []).map(member => Number(member.id)));
+		  users = users.filter(user => !existingMembers.has(Number(user.id)));
+		}
         const groupMode = layer.dataset.groupMode === '1';
-        if (!users.length) { list.innerHTML = '<div class="rcm-mini-empty">No permitted users found.</div>'; return; }
+        if (!users.length) { list.innerHTML = `<div class="rcm-mini-empty">${esc(labels.noPermittedUsers || 'No permitted users found.')}</div>`; return; }
         list.innerHTML = users.map(user => groupMode
           ? `<label class="rcm-user-pick-row"><input type="checkbox" data-role="group-member" value="${Number(user.id)}"><span>${this.avatarHtml(user, 'sm')}<span><strong>${esc(user.name)}</strong><small>${esc(this.userSecondary(user))}</small></span></span></label>`
           : `<button type="button" class="rcm-user-pick-row" data-contact-user="${Number(user.id)}">${this.avatarHtml(user, 'sm')}<span><strong>${esc(user.name)}</strong><small>${esc(this.userSecondary(user))}</small></span><i>›</i></button>`
@@ -753,7 +840,9 @@
         if (groupMode) {
           list.querySelectorAll('[data-role="group-member"]').forEach(cb => cb.addEventListener('change', () => this.updateGroupSelection()));
         }
-      } catch (error) { list.innerHTML = `<div class="rcm-mini-empty">${esc(error.message)}</div>`; }
+	  } catch (error) {
+		if (requestToken === this.userSearchRequestToken && list.isConnected) list.innerHTML = `<div class="rcm-mini-empty">${esc(error.message)}</div>`;
+	  }
     }
 
     updateGroupSelection() {
@@ -781,7 +870,9 @@
 
     closeModal() {
       const layer = this.root.querySelector('[data-role="modal-layer"]');
-      if (layer) { layer.classList.remove('is-open'); layer.innerHTML = ''; delete layer.dataset.groupMode; }
+	  this.userSearchRequestToken++;
+	  this.messageSearchRequestToken++;
+	  if (layer) { layer.classList.remove('is-open'); layer.innerHTML = ''; delete layer.dataset.groupMode; delete layer.dataset.addToGroup; }
     }
 
     async updateConversationState(payload) {
@@ -820,8 +911,8 @@
     detailsHtml(c) {
       const members = c.members || [];
       if (c.type === 'group') {
-        return `<div class="rcm-details-head"><button type="button" class="rcm-icon-btn" data-action="details">×</button><span>${this.avatarHtml({ name: c.title, avatar: c.avatar }, 'lg')}</span><h3>${esc(c.title)}</h3><p>${members.length} members</p></div>
-          <div class="rcm-details-section"><div class="rcm-details-section-title"><strong>Members</strong>${c.can_manage ? `<button type="button" data-action="add-group-member">＋ ${esc(labels.addMember || 'Add member')}</button>` : ''}</div>${members.map(member => `<div class="rcm-detail-member">${this.avatarHtml(member, 'sm')}<span><strong>${esc(member.name)}</strong><small>${esc(this.userSecondary(member))}</small></span>${c.can_manage && Number(member.id) !== Number(this.state.user.id) && Number(member.id) !== Number(c.created_by) ? `<button type="button" data-action="remove-group-member" data-user-id="${Number(member.id)}">×</button>` : ''}</div>`).join('')}</div>
+        return `<div class="rcm-details-head"><button type="button" class="rcm-icon-btn" data-action="details">×</button><span>${this.avatarHtml({ name: c.title, avatar: c.avatar }, 'lg')}</span><h3>${esc(c.title)}</h3><p>${members.length} ${esc(labels.members || 'Members')}</p></div>
+          <div class="rcm-details-section"><div class="rcm-details-section-title"><strong>${esc(labels.members || 'Members')}</strong>${c.can_manage ? `<button type="button" data-action="add-group-member">＋ ${esc(labels.addMember || 'Add member')}</button>` : ''}</div>${members.map(member => `<div class="rcm-detail-member">${this.avatarHtml(member, 'sm')}<span><strong>${esc(member.name)}</strong><small>${esc(this.userSecondary(member))}</small></span>${c.can_manage && Number(member.id) !== Number(this.state.user.id) && Number(member.id) !== Number(c.created_by) ? `<button type="button" data-action="remove-group-member" data-user-id="${Number(member.id)}">×</button>` : ''}</div>`).join('')}</div>
           <div class="rcm-details-section"><button type="button" class="rcm-danger-row" data-action="leave-group">↪ ${esc(labels.leaveGroup || 'Leave group')}</button><button type="button" data-action="archive">▣ ${esc(c.is_archived ? labels.unarchive : labels.archive)}</button></div>`;
       }
       const other = members.find(m => Number(m.id) !== Number(this.state.user.id));
@@ -832,7 +923,7 @@
         <div class="rcm-details-section">
           <button type="button" data-action="${contact ? 'remove-contact' : 'add-contact'}">${contact ? '−' : '+'} ${esc(contact ? labels.removeContact : labels.addContact)}</button>
           <button type="button" data-action="archive">▣ ${esc(c.is_archived ? labels.unarchive : labels.archive)}</button>
-          ${this.state.features.blocking ? `<button type="button" class="${blocked ? '' : 'rcm-danger-row'}" data-action="${blocked ? 'unblock-user' : 'block-user'}">${blocked ? '✓ Unblock user' : `⊘ ${esc(labels.block || 'Block user')}`}</button>` : ''}
+          ${this.state.features.blocking ? `<button type="button" class="${blocked ? '' : 'rcm-danger-row'}" data-action="${blocked ? 'unblock-user' : 'block-user'}">${blocked ? `✓ ${esc(labels.unblock || 'Unblock user')}` : `⊘ ${esc(labels.block || 'Block user')}`}</button>` : ''}
         </div>`;
     }
 
@@ -840,6 +931,7 @@
       const other = this.activeOtherUser();
       if (!other) return;
       const category = this.state.categories.length ? window.prompt(`Category ID (optional): ${this.state.categories.map(c => `${c.id}=${c.name}`).join(', ')}`, '0') : '0';
+	  if (category === null) return;
       try {
         const data = await this.api('contacts', { method: 'POST', body: { user_id: other.id, category_id: Number(category || 0) } });
         this.state.contacts = data.contacts || [];
@@ -918,12 +1010,12 @@
       const layer = this.root.querySelector('[data-role="modal-layer"]');
       if (!layer) return;
       const choices = this.state.conversations.filter(c => !c.is_archived && Number(c.id) !== Number(this.state.activeConversationId));
-      layer.innerHTML = `<div class="rcm-modal-backdrop" data-action="close-modal"></div><section class="rcm-modal rcm-modal-small"><header><div><h3>Forward message</h3><p>Select a destination conversation.</p></div><button type="button" data-action="close-modal">×</button></header><div class="rcm-user-picker-list">${choices.length ? choices.map(c => `<button type="button" class="rcm-user-pick-row" data-forward-to="${Number(c.id)}">${this.avatarHtml({name:c.title,avatar:c.avatar}, 'sm')}<span><strong>${esc(c.title)}</strong><small>${esc(c.type)}</small></span><i>›</i></button>`).join('') : '<div class="rcm-mini-empty">No other conversations available.</div>'}</div></section>`;
+      layer.innerHTML = `<div class="rcm-modal-backdrop" data-action="close-modal"></div><section class="rcm-modal rcm-modal-small" role="dialog" aria-modal="true"><header><div><h3>${esc(labels.forwardMessage || 'Forward message')}</h3><p>Select a destination conversation.</p></div><button type="button" data-action="close-modal">×</button></header><div class="rcm-user-picker-list">${choices.length ? choices.map(c => `<button type="button" class="rcm-user-pick-row" data-forward-to="${Number(c.id)}">${this.avatarHtml({name:c.title,avatar:c.avatar}, 'sm')}<span><strong>${esc(c.title)}</strong><small>${esc(c.type)}</small></span><i>›</i></button>`).join('') : '<div class="rcm-mini-empty">No other conversations available.</div>'}</div></section>`;
       layer.classList.add('is-open');
       layer.querySelectorAll('[data-forward-to]').forEach(btn => btn.addEventListener('click', async () => {
         try {
           await this.api(`messages/${messageId}/forward`, { method: 'POST', body: { conversation_id: Number(btn.dataset.forwardTo) } });
-          this.closeModal(); this.toast('Message forwarded.', 'success'); await this.refreshConversations();
+          this.closeModal(); this.toast(labels.messageForwarded || 'Message forwarded.', 'success'); await this.refreshConversations();
         } catch (error) { this.toast(error.message, 'error'); }
       }));
     }
@@ -931,7 +1023,7 @@
     openMessageSearch() {
       const layer = this.root.querySelector('[data-role="modal-layer"]');
       if (!layer || !this.activeConversation()) return;
-      layer.innerHTML = `<div class="rcm-modal-backdrop" data-action="close-modal"></div><section class="rcm-modal"><header><div><h3>Search messages</h3><p>${esc(this.activeConversation().title)}</p></div><button type="button" data-action="close-modal">×</button></header><div class="rcm-search-box rcm-modal-search"><span>⌕</span><input type="search" data-role="message-search" placeholder="Type at least 2 characters…" autofocus></div><div class="rcm-message-search-results" data-role="message-search-results"><div class="rcm-mini-empty">Enter a search term.</div></div></section>`;
+      layer.innerHTML = `<div class="rcm-modal-backdrop" data-action="close-modal"></div><section class="rcm-modal" role="dialog" aria-modal="true"><header><div><h3>${esc(labels.searchMessages || 'Search messages')}</h3><p>${esc(this.activeConversation().title)}</p></div><button type="button" data-action="close-modal">×</button></header><div class="rcm-search-box rcm-modal-search"><span>⌕</span><input type="search" data-role="message-search" placeholder="Type at least 2 characters…" autofocus></div><div class="rcm-message-search-results" data-role="message-search-results"><div class="rcm-mini-empty">Enter a search term.</div></div></section>`;
       layer.classList.add('is-open');
     }
 
@@ -939,11 +1031,14 @@
       const host = this.root.querySelector('[data-role="message-search-results"]');
       if (!host) return;
       if (q.trim().length < 2) { host.innerHTML = '<div class="rcm-mini-empty">Enter at least 2 characters.</div>'; return; }
+	  const conversationId = Number(this.state.activeConversationId);
+	  const requestToken = ++this.messageSearchRequestToken;
       host.innerHTML = `<div class="rcm-message-loader"><span class="rcm-spinner"></span></div>`;
       try {
-        const data = await this.api(`conversations/${this.state.activeConversationId}/search?q=${encodeURIComponent(q.trim())}`);
+		const data = await this.api(`conversations/${conversationId}/search?q=${encodeURIComponent(q.trim())}`);
+		if (requestToken !== this.messageSearchRequestToken || Number(this.state.activeConversationId) !== conversationId || !host.isConnected) return;
         const items = data.messages || [];
-        host.innerHTML = items.length ? items.map(m => `<button type="button" class="rcm-search-result" data-search-message-id="${Number(m.id)}"><strong>${esc(m.sender?.name || 'User')}</strong><span>${esc(m.content || labels.messageDeleted || '')}</span><time>${esc(fmtFullTime(m.created_at))}</time></button>`).join('') : '<div class="rcm-mini-empty">No messages found.</div>';
+        host.innerHTML = items.length ? items.map(m => `<button type="button" class="rcm-search-result" data-search-message-id="${Number(m.id)}"><strong>${esc(m.sender?.name || 'User')}</strong><span>${esc(m.content || labels.messageDeleted || '')}</span><time>${esc(fmtFullTime(m.created_at))}</time></button>`).join('') : `<div class="rcm-mini-empty">${esc(labels.noMessagesFound || 'No messages found.')}</div>`;
         host.querySelectorAll('[data-search-message-id]').forEach(btn => btn.addEventListener('click', () => {
           const id = Number(btn.dataset.searchMessageId);
           const exists = this.state.messages.some(m => Number(m.id) === id);
@@ -952,7 +1047,9 @@
             this.root.querySelector(`[data-message-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
           } else this.toast('Load earlier history to view this result.', 'info');
         }));
-      } catch (error) { host.innerHTML = `<div class="rcm-mini-empty">${esc(error.message)}</div>`; }
+	  } catch (error) {
+		if (requestToken === this.messageSearchRequestToken && host.isConnected) host.innerHTML = `<div class="rcm-mini-empty">${esc(error.message)}</div>`;
+	  }
     }
 
     openAddGroupMember() {
@@ -984,12 +1081,17 @@
 
     async requestNotifications() {
       if (!('Notification' in window)) return;
-      const permission = await Notification.requestPermission();
-      this.toast(permission === 'granted' ? 'Browser notifications enabled.' : 'Browser notifications were not enabled.', permission === 'granted' ? 'success' : 'info');
+	  try {
+		const permission = await Notification.requestPermission();
+		this.toast(permission === 'granted' ? (labels.notificationEnabled || 'Browser notifications enabled.') : (labels.notificationNotEnabled || 'Browser notifications were not enabled.'), permission === 'granted' ? 'success' : 'info');
+	  } catch (error) {
+		this.toast(error.message || labels.error || 'Something went wrong.', 'error');
+	  }
     }
 
     notifyConversationSummary(c) {
       if (!c) return;
+	  this.notifiedThrough.set(Number(c.id), Number(c.last_message_id || 0));
       const muted = c.muted_until && new Date(c.muted_until + 'Z').getTime() > Date.now();
       if (muted) return;
       const sender = (c.members || []).find(m => Number(m.id) === Number(c.last_message?.sender_id));
@@ -1005,6 +1107,7 @@
     notifyNewMessages(messages) {
       if (!messages.length) return;
       const c = this.activeConversation();
+	  if (c) this.notifiedThrough.set(Number(c.id), Math.max(...messages.map(message => Number(message.id) || 0)));
       const muted = c?.muted_until && new Date(c.muted_until + 'Z').getTime() > Date.now();
       if (!muted && this.state.features.browser_notifications && 'Notification' in window && Notification.permission === 'granted') {
         const latest = messages[messages.length - 1];
@@ -1041,7 +1144,7 @@
     }
 
     renderFatal(message) {
-      this.root.innerHTML = `<div class="rcm-fatal"><strong>RoleChat could not start.</strong><p>${esc(message)}</p></div>`;
+      this.root.innerHTML = `<div class="rcm-fatal"><strong>${esc(labels.roleChatCouldNotStart || 'RoleChat could not start.')}</strong><p>${esc(message)}</p></div>`;
     }
   }
 

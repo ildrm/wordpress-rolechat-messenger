@@ -26,7 +26,8 @@ final class RCM_Admin {
 		}
 		if ( current_user_can( 'rcm_moderate_chat' ) || current_user_can( 'manage_options' ) ) {
 			$parent = RCM_Permissions::can_use_backend() ? 'rcm-chat' : 'tools.php';
-			add_submenu_page( $parent, __( 'Chat Moderation', 'rolechat-messenger' ), __( 'Moderation', 'rolechat-messenger' ), 'rcm_moderate_chat', 'rcm-moderation', array( __CLASS__, 'moderation_page' ) );
+			$capability = current_user_can( 'rcm_moderate_chat' ) ? 'rcm_moderate_chat' : 'manage_options';
+			add_submenu_page( $parent, __( 'Chat Moderation', 'rolechat-messenger' ), __( 'Moderation', 'rolechat-messenger' ), $capability, 'rcm-moderation', array( __CLASS__, 'moderation_page' ) );
 		}
 		if ( current_user_can( 'manage_options' ) ) {
 			$parent = RCM_Permissions::can_use_backend() ? 'rcm-chat' : 'options-general.php';
@@ -57,45 +58,70 @@ final class RCM_Admin {
 			'currentUserId'=> get_current_user_id(),
 			'pollInterval' => max( 2000, (int) $settings['poll_interval_ms'] ),
 			'accent'       => sanitize_hex_color( $settings['frontend_widget_accent'] ) ?: '#229ED9',
-			'labels'       => array(
-				'loading'          => __( 'Loading conversations…', 'rolechat-messenger' ),
-				'noConversations'  => __( 'No conversations yet.', 'rolechat-messenger' ),
-				'newMessage'       => __( 'New message', 'rolechat-messenger' ),
-				'newChat'          => __( 'New chat', 'rolechat-messenger' ),
-				'newGroup'         => __( 'New group', 'rolechat-messenger' ),
-				'contacts'         => __( 'Contacts', 'rolechat-messenger' ),
-				'archived'         => __( 'Archived', 'rolechat-messenger' ),
-				'search'           => __( 'Search', 'rolechat-messenger' ),
-				'typeMessage'      => __( 'Write a message…', 'rolechat-messenger' ),
-				'send'             => __( 'Send', 'rolechat-messenger' ),
-				'attach'           => __( 'Attach', 'rolechat-messenger' ),
-				'typing'           => __( 'typing…', 'rolechat-messenger' ),
-				'online'           => __( 'Online', 'rolechat-messenger' ),
-				'away'             => __( 'Away', 'rolechat-messenger' ),
-				'busy'             => __( 'Busy', 'rolechat-messenger' ),
-				'dnd'              => __( 'Do not disturb', 'rolechat-messenger' ),
-				'offline'          => __( 'Offline', 'rolechat-messenger' ),
-				'reply'            => __( 'Reply', 'rolechat-messenger' ),
-				'edit'             => __( 'Edit', 'rolechat-messenger' ),
-				'delete'           => __( 'Delete', 'rolechat-messenger' ),
-				'report'           => __( 'Report', 'rolechat-messenger' ),
-				'pin'              => __( 'Pin', 'rolechat-messenger' ),
-				'unpin'            => __( 'Unpin', 'rolechat-messenger' ),
-				'archive'          => __( 'Archive', 'rolechat-messenger' ),
-				'unarchive'        => __( 'Unarchive', 'rolechat-messenger' ),
-				'mute'             => __( 'Mute', 'rolechat-messenger' ),
-				'unmute'           => __( 'Unmute', 'rolechat-messenger' ),
-				'groupInfo'        => __( 'Group info', 'rolechat-messenger' ),
-				'addMember'        => __( 'Add member', 'rolechat-messenger' ),
-				'leaveGroup'       => __( 'Leave group', 'rolechat-messenger' ),
-				'addContact'       => __( 'Add contact', 'rolechat-messenger' ),
-				'removeContact'    => __( 'Remove contact', 'rolechat-messenger' ),
-				'block'            => __( 'Block user', 'rolechat-messenger' ),
-				'error'            => __( 'Something went wrong.', 'rolechat-messenger' ),
-				'messageDeleted'   => __( 'Message deleted', 'rolechat-messenger' ),
-				'edited'           => __( 'edited', 'rolechat-messenger' ),
-				'selectConversation'=> __( 'Select a conversation to start messaging.', 'rolechat-messenger' ),
-			),
+			'labels'       => self::js_labels(),
+		);
+	}
+
+	public static function js_labels(): array {
+		return array(
+			'loading'                  => __( 'Loading conversations…', 'rolechat-messenger' ),
+			'noConversations'          => __( 'No conversations yet.', 'rolechat-messenger' ),
+			'newMessage'               => __( 'New message', 'rolechat-messenger' ),
+			'newChat'                  => __( 'New chat', 'rolechat-messenger' ),
+			'newGroup'                 => __( 'New group', 'rolechat-messenger' ),
+			'contacts'                 => __( 'Contacts', 'rolechat-messenger' ),
+			'archived'                 => __( 'Archived', 'rolechat-messenger' ),
+			'search'                   => __( 'Search', 'rolechat-messenger' ),
+			'typeMessage'              => __( 'Write a message…', 'rolechat-messenger' ),
+			'send'                     => __( 'Send', 'rolechat-messenger' ),
+			'attach'                   => __( 'Attach', 'rolechat-messenger' ),
+			'typing'                   => __( 'typing…', 'rolechat-messenger' ),
+			'online'                   => __( 'Online', 'rolechat-messenger' ),
+			'away'                     => __( 'Away', 'rolechat-messenger' ),
+			'busy'                     => __( 'Busy', 'rolechat-messenger' ),
+			'dnd'                      => __( 'Do not disturb', 'rolechat-messenger' ),
+			'offline'                  => __( 'Offline', 'rolechat-messenger' ),
+			'reply'                    => __( 'Reply', 'rolechat-messenger' ),
+			'edit'                     => __( 'Edit', 'rolechat-messenger' ),
+			'delete'                   => __( 'Delete', 'rolechat-messenger' ),
+			'report'                   => __( 'Report', 'rolechat-messenger' ),
+			'pin'                      => __( 'Pin', 'rolechat-messenger' ),
+			'unpin'                    => __( 'Unpin', 'rolechat-messenger' ),
+			'archive'                  => __( 'Archive', 'rolechat-messenger' ),
+			'unarchive'                => __( 'Unarchive', 'rolechat-messenger' ),
+			'mute'                     => __( 'Mute', 'rolechat-messenger' ),
+			'unmute'                   => __( 'Unmute', 'rolechat-messenger' ),
+			'groupInfo'                => __( 'Group info', 'rolechat-messenger' ),
+			'addMember'                => __( 'Add member', 'rolechat-messenger' ),
+			'leaveGroup'               => __( 'Leave group', 'rolechat-messenger' ),
+			'addContact'               => __( 'Add contact', 'rolechat-messenger' ),
+			'removeContact'            => __( 'Remove contact', 'rolechat-messenger' ),
+			'block'                    => __( 'Block user', 'rolechat-messenger' ),
+			'error'                    => __( 'Something went wrong.', 'rolechat-messenger' ),
+			'messageDeleted'           => __( 'Message deleted', 'rolechat-messenger' ),
+			'edited'                   => __( 'edited', 'rolechat-messenger' ),
+			'selectConversation'       => __( 'Select a conversation to start messaging.', 'rolechat-messenger' ),
+			'chats'                    => __( 'Chats', 'rolechat-messenger' ),
+			'allContacts'              => __( 'All contacts', 'rolechat-messenger' ),
+			'category'                 => __( 'Category', 'rolechat-messenger' ),
+			'noContacts'               => __( 'No contacts', 'rolechat-messenger' ),
+			'noMessages'               => __( 'No messages yet. Start the conversation.', 'rolechat-messenger' ),
+			'loadEarlier'              => __( 'Load earlier messages', 'rolechat-messenger' ),
+			'waitForUploads'           => __( 'Please wait for attachments to finish uploading.', 'rolechat-messenger' ),
+			'attachment'               => __( 'Attachment', 'rolechat-messenger' ),
+			'forward'                  => __( 'Forward', 'rolechat-messenger' ),
+			'forwardMessage'           => __( 'Forward message', 'rolechat-messenger' ),
+			'messageForwarded'         => __( 'Message forwarded.', 'rolechat-messenger' ),
+			'searchMessages'           => __( 'Search messages', 'rolechat-messenger' ),
+			'noMessagesFound'          => __( 'No messages found.', 'rolechat-messenger' ),
+			'members'                  => __( 'Members', 'rolechat-messenger' ),
+			'unblock'                  => __( 'Unblock user', 'rolechat-messenger' ),
+			'createGroup'              => __( 'Create group', 'rolechat-messenger' ),
+			'noPermittedUsers'         => __( 'No permitted users found.', 'rolechat-messenger' ),
+			'notifications'            => __( 'Notifications', 'rolechat-messenger' ),
+			'notificationEnabled'      => __( 'Browser notifications enabled.', 'rolechat-messenger' ),
+			'notificationNotEnabled'   => __( 'Browser notifications were not enabled.', 'rolechat-messenger' ),
+			'roleChatCouldNotStart'    => __( 'RoleChat could not start.', 'rolechat-messenger' ),
 		);
 	}
 
@@ -213,6 +239,7 @@ final class RCM_Admin {
 						<div class="rcm-card-title"><span class="dashicons dashicons-shield-alt"></span><div><h2><?php esc_html_e( 'Security & lifecycle', 'rolechat-messenger' ); ?></h2><p><?php esc_html_e( 'Limit abuse, restrict uploads, and define retention/privacy behavior.', 'rolechat-messenger' ); ?></p></div></div>
 						<div class="rcm-field-grid">
 							<?php self::number_field( 'rate_limit_per_minute', __( 'Messages per minute', 'rolechat-messenger' ), $settings, 1, 300 ); ?>
+							<?php self::number_field( 'upload_rate_limit_per_minute', __( 'Attachments per minute', 'rolechat-messenger' ), $settings, 1, 60 ); ?>
 							<?php self::number_field( 'max_attachment_mb', __( 'Max attachment size (MB)', 'rolechat-messenger' ), $settings, 1, 100 ); ?>
 							<?php self::number_field( 'retention_days', __( 'Retention days (0 = forever)', 'rolechat-messenger' ), $settings, 0, 3650 ); ?>
 							<?php self::number_field( 'poll_interval_ms', __( 'Polling interval (ms)', 'rolechat-messenger' ), $settings, 2000, 60000 ); ?>
@@ -282,6 +309,7 @@ final class RCM_Admin {
 		$new['edit_window_minutes']         = min( 10080, max( 0, absint( $_POST['edit_window_minutes'] ?? 15 ) ) );
 		$new['delete_for_everyone_minutes'] = min( 10080, max( 0, absint( $_POST['delete_for_everyone_minutes'] ?? 60 ) ) );
 		$new['rate_limit_per_minute']       = min( 300, max( 1, absint( $_POST['rate_limit_per_minute'] ?? 30 ) ) );
+		$new['upload_rate_limit_per_minute'] = min( 60, max( 1, absint( $_POST['upload_rate_limit_per_minute'] ?? 10 ) ) );
 		$new['max_attachment_mb']           = min( 100, max( 1, absint( $_POST['max_attachment_mb'] ?? 10 ) ) );
 		$new['retention_days']              = min( 3650, max( 0, absint( $_POST['retention_days'] ?? 0 ) ) );
 		$new['poll_interval_ms']            = min( 60000, max( 2000, absint( $_POST['poll_interval_ms'] ?? 3500 ) ) );
@@ -338,9 +366,11 @@ final class RCM_Admin {
 			 LEFT JOIN " . RCM_DB::table( 'messages' ) . " m ON m.id = r.message_id
 			 ORDER BY (r.status='open') DESC, r.created_at DESC LIMIT 100"
 		);
-		$logs = $wpdb->get_results( "SELECT * FROM " . RCM_DB::table( 'audit_log' ) . " ORDER BY id DESC LIMIT 100" );
-		$settings = RCM_Permissions::settings();
-		$inspect_id = absint( $_GET['conversation'] ?? 0 );
+		$can_view_audit = current_user_can( 'rcm_view_audit_log' ) || current_user_can( 'manage_options' );
+		$logs           = $can_view_audit ? $wpdb->get_results( "SELECT * FROM " . RCM_DB::table( 'audit_log' ) . " ORDER BY id DESC LIMIT 100" ) : array();
+		$settings       = RCM_Permissions::settings();
+		$can_inspect    = ! empty( $settings['admin_can_read_all'] ) && current_user_can( 'manage_options' );
+		$inspect_id     = $can_inspect ? absint( $_GET['conversation'] ?? 0 ) : 0;
 		if ( $inspect_id ) {
 			$inspect_nonce = sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ?? '' ) );
 			if ( ! wp_verify_nonce( $inspect_nonce, 'rcm_inspect_conversation_' . $inspect_id ) ) {
@@ -366,22 +396,28 @@ final class RCM_Admin {
 				<section class="rcm-settings-card rcm-settings-card-wide">
 					<div class="rcm-card-title"><span class="dashicons dashicons-flag"></span><div><h2><?php esc_html_e( 'Message reports', 'rolechat-messenger' ); ?></h2><p><?php esc_html_e( 'Reported messages are visible to moderators regardless of general conversation-inspection policy.', 'rolechat-messenger' ); ?></p></div></div>
 					<div class="rcm-table-scroll"><table class="widefat striped rcm-audit-table"><thead><tr><th>ID</th><th><?php esc_html_e( 'Reporter', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Sender', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Message / reason', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Status', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Actions', 'rolechat-messenger' ); ?></th></tr></thead><tbody>
-					<?php if ( empty( $reports ) ) : ?><tr><td colspan="6"><?php esc_html_e( 'No reports.', 'rolechat-messenger' ); ?></td></tr><?php else : foreach ( $reports as $report ) : $reporter = get_userdata( (int) $report->reporter_id ); $sender = get_userdata( (int) $report->sender_id ); ?><tr><td>#<?php echo (int) $report->id; ?></td><td><?php echo esc_html( $reporter ? $reporter->display_name : '#' . $report->reporter_id ); ?></td><td><?php echo esc_html( $sender ? $sender->display_name : '#' . $report->sender_id ); ?></td><td><strong><?php echo esc_html( wp_html_excerpt( (string) $report->message_content, 100, '…' ) ); ?></strong><br><small><?php echo esc_html( $report->reason ); ?></small></td><td><span class="rcm-status-pill rcm-status-<?php echo esc_attr( $report->status ); ?>"><?php echo esc_html( ucfirst( $report->status ) ); ?></span></td><td><?php if ( 'open' === $report->status ) : ?><form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="rcm-table-actions"><input type="hidden" name="action" value="rcm_moderation_action"><input type="hidden" name="report_id" value="<?php echo (int) $report->id; ?>"><?php wp_nonce_field( 'rcm_moderation_action' ); ?><button class="button button-small" name="moderation_action" value="resolve_report"><?php esc_html_e( 'Resolve', 'rolechat-messenger' ); ?></button><button class="button button-small button-link-delete" name="moderation_action" value="delete_reported_message"><?php esc_html_e( 'Delete message', 'rolechat-messenger' ); ?></button></form><?php endif; ?><?php if ( ! empty( $settings['admin_can_read_all'] ) ) : ?> <a class="button button-small" href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'page' => 'rcm-moderation', 'conversation' => (int) $report->conversation_id ), admin_url( 'admin.php' ) ), 'rcm_inspect_conversation_' . (int) $report->conversation_id ) ); ?>"><?php esc_html_e( 'Inspect', 'rolechat-messenger' ); ?></a><?php endif; ?></td></tr><?php endforeach; endif; ?>
+					<?php if ( empty( $reports ) ) : ?><tr><td colspan="6"><?php esc_html_e( 'No reports.', 'rolechat-messenger' ); ?></td></tr><?php else : foreach ( $reports as $report ) : $reporter = get_userdata( (int) $report->reporter_id ); $sender = get_userdata( (int) $report->sender_id ); ?><tr><td>#<?php echo (int) $report->id; ?></td><td><?php echo esc_html( $reporter ? $reporter->display_name : '#' . $report->reporter_id ); ?></td><td><?php echo esc_html( $sender ? $sender->display_name : '#' . $report->sender_id ); ?></td><td><strong><?php echo esc_html( wp_html_excerpt( (string) $report->message_content, 100, '…' ) ); ?></strong><br><small><?php echo esc_html( $report->reason ); ?></small></td><td><span class="rcm-status-pill rcm-status-<?php echo esc_attr( $report->status ); ?>"><?php echo esc_html( ucfirst( $report->status ) ); ?></span></td><td><?php if ( 'open' === $report->status ) : ?><form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="rcm-table-actions"><input type="hidden" name="action" value="rcm_moderation_action"><input type="hidden" name="report_id" value="<?php echo (int) $report->id; ?>"><?php wp_nonce_field( 'rcm_moderation_action' ); ?><button class="button button-small" name="moderation_action" value="resolve_report"><?php esc_html_e( 'Resolve', 'rolechat-messenger' ); ?></button><button class="button button-small button-link-delete" name="moderation_action" value="delete_reported_message"><?php esc_html_e( 'Delete message', 'rolechat-messenger' ); ?></button></form><?php endif; ?><?php if ( $can_inspect && $report->conversation_id ) : ?> <a class="button button-small" href="<?php echo esc_url( wp_nonce_url( add_query_arg( array( 'page' => 'rcm-moderation', 'conversation' => (int) $report->conversation_id ), admin_url( 'admin.php' ) ), 'rcm_inspect_conversation_' . (int) $report->conversation_id ) ); ?>"><?php esc_html_e( 'Inspect', 'rolechat-messenger' ); ?></a><?php endif; ?></td></tr><?php endforeach; endif; ?>
 					</tbody></table></div>
 				</section>
 
-				<?php if ( $inspect_id && ! empty( $settings['admin_can_read_all'] ) ) : self::render_conversation_inspection( $inspect_id ); endif; ?>
+				<?php if ( $inspect_id && $can_inspect ) : self::render_conversation_inspection( $inspect_id ); endif; ?>
 
+				<?php if ( $can_view_audit ) : ?>
 				<section class="rcm-settings-card rcm-settings-card-wide">
 					<div class="rcm-card-title"><span class="dashicons dashicons-list-view"></span><div><h2><?php esc_html_e( 'Audit log', 'rolechat-messenger' ); ?></h2><p><?php esc_html_e( 'Administrative and security-sensitive chat actions.', 'rolechat-messenger' ); ?></p></div></div>
 					<div class="rcm-table-scroll"><table class="widefat striped rcm-audit-table"><thead><tr><th><?php esc_html_e( 'Time', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Actor', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Action', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Object', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'IP', 'rolechat-messenger' ); ?></th><th><?php esc_html_e( 'Details', 'rolechat-messenger' ); ?></th></tr></thead><tbody><?php foreach ( $logs as $log ) : $actor = get_userdata( (int) $log->actor_id ); ?><tr><td><?php echo esc_html( get_date_from_gmt( $log->created_at, 'Y-m-d H:i:s' ) ); ?></td><td><?php echo esc_html( $actor ? $actor->display_name : '#' . $log->actor_id ); ?></td><td><code><?php echo esc_html( $log->action ); ?></code></td><td><?php echo esc_html( $log->object_type . ( $log->object_id ? ' #' . $log->object_id : '' ) ); ?></td><td><code><?php echo esc_html( $log->ip_address ); ?></code></td><td><small><?php echo esc_html( wp_html_excerpt( (string) $log->details, 160, '…' ) ); ?></small></td></tr><?php endforeach; ?></tbody></table></div>
 				</section>
+				<?php endif; ?>
 			</div>
 		</div>
 		<?php
 	}
 
 	private static function render_conversation_inspection( int $conversation_id ): void {
+		$settings = RCM_Permissions::settings();
+		if ( ! current_user_can( 'manage_options' ) || empty( $settings['admin_can_read_all'] ) ) {
+			return;
+		}
 		global $wpdb;
 		$conversation = RCM_DB::conversation_row( $conversation_id );
 		if ( ! $conversation ) { return; }
@@ -406,7 +442,8 @@ final class RCM_Admin {
 				$user_id = absint( $_POST['user_id'] ?? 0 );
 				$duration = sanitize_text_field( wp_unslash( $_POST['duration'] ?? '1440' ) );
 				$reason = sanitize_text_field( wp_unslash( $_POST['reason'] ?? '' ) );
-				if ( $user_id && get_userdata( $user_id ) && ! user_can( $user_id, 'manage_options' ) ) {
+				$allowed_durations = array( '60', '1440', '10080', '43200', 'forever' );
+				if ( $user_id && in_array( $duration, $allowed_durations, true ) && get_userdata( $user_id ) && ! user_can( $user_id, 'manage_options' ) ) {
 					$until = 'forever' === $duration ? 'forever' : gmdate( 'Y-m-d H:i:s', time() + max( 1, absint( $duration ) ) * MINUTE_IN_SECONDS );
 					update_user_meta( $user_id, '_rcm_suspended_until', $until );
 					update_user_meta( $user_id, '_rcm_suspension_reason', $reason );
@@ -415,21 +452,29 @@ final class RCM_Admin {
 				break;
 			case 'unsuspend_user':
 				$user_id = absint( $_POST['user_id'] ?? 0 );
-				delete_user_meta( $user_id, '_rcm_suspended_until' ); delete_user_meta( $user_id, '_rcm_suspension_reason' );
-				RCM_DB::audit( $actor, 'user_unsuspended', 'user', $user_id );
+				if ( $user_id && get_userdata( $user_id ) ) {
+					delete_user_meta( $user_id, '_rcm_suspended_until' );
+					delete_user_meta( $user_id, '_rcm_suspension_reason' );
+					RCM_DB::audit( $actor, 'user_unsuspended', 'user', $user_id );
+				}
 				break;
 			case 'resolve_report':
 			case 'delete_reported_message':
 				$report_id = absint( $_POST['report_id'] ?? 0 );
 				$report = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM " . RCM_DB::table( 'reports' ) . " WHERE id = %d", $report_id ) );
-				if ( $report ) {
+				if ( $report && 'open' === $report->status ) {
 					if ( 'delete_reported_message' === $action ) {
-						RCM_REST::purge_message_attachments( (int) $report->message_id );
-						$wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => '', 'deleted_at' => RCM_DB::now(), 'deleted_by' => $actor ), array( 'id' => (int) $report->message_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
-						RCM_DB::audit( $actor, 'reported_message_deleted', 'message', (int) $report->message_id, array( 'report_id' => $report_id ) );
+						$deleted = $wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => '', 'deleted_at' => RCM_DB::now(), 'deleted_by' => $actor ), array( 'id' => (int) $report->message_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
+						if ( false !== $deleted && RCM_REST::purge_message_attachments( (int) $report->message_id ) ) {
+							RCM_DB::audit( $actor, 'reported_message_deleted', 'message', (int) $report->message_id, array( 'report_id' => $report_id ) );
+						} else {
+							break;
+						}
 					}
-					$wpdb->update( RCM_DB::table( 'reports' ), array( 'status' => 'resolved', 'reviewed_by' => $actor, 'reviewed_at' => RCM_DB::now() ), array( 'id' => $report_id ), array( '%s', '%d', '%s' ), array( '%d' ) );
-					RCM_DB::audit( $actor, 'report_resolved', 'report', $report_id );
+					$resolved = $wpdb->update( RCM_DB::table( 'reports' ), array( 'status' => 'resolved', 'reviewed_by' => $actor, 'reviewed_at' => RCM_DB::now() ), array( 'id' => $report_id ), array( '%s', '%d', '%s' ), array( '%d' ) );
+					if ( false !== $resolved ) {
+						RCM_DB::audit( $actor, 'report_resolved', 'report', $report_id );
+					}
 				}
 				break;
 		}

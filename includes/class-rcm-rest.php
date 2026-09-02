@@ -4,6 +4,11 @@ defined( 'ABSPATH' ) || exit;
 
 final class RCM_REST {
 	private const NS = 'rolechat/v1';
+	private const MAX_MESSAGE_LENGTH = 10000;
+	private const MAX_GROUP_TITLE_LENGTH = 190;
+	private const MAX_CATEGORY_NAME_LENGTH = 120;
+	private const MAX_REPORT_REASON_LENGTH = 1000;
+	private const MAX_GROUP_MEMBERS = 200;
 
 	public static function init(): void {
 		add_action( 'rest_api_init', array( __CLASS__, 'register_routes' ) );
@@ -236,9 +241,22 @@ final class RCM_REST {
 		$c = RCM_DB::table( 'conversations' );
 		$m = RCM_DB::table( 'members' );
 		$g = RCM_DB::table( 'messages' );
+		$wpdb->query( $wpdb->prepare(
+			"UPDATE {$m} mem
+			 INNER JOIN {$c} conv ON conv.id = mem.conversation_id
+			 INNER JOIN {$g} lm ON lm.id = conv.last_message_id
+			 SET mem.last_delivered_message_id = conv.last_message_id
+			 WHERE mem.user_id = %d AND conv.status = 'active'
+			   AND conv.last_message_id > mem.last_delivered_message_id AND lm.sender_id <> %d",
+			$user_id,
+			$user_id
+		) );
 
 		$rows = $wpdb->get_results( $wpdb->prepare(
-			"SELECT c.*, mem.last_read_message_id, mem.last_delivered_message_id, mem.is_pinned, mem.is_archived, mem.muted_until,
+			"SELECT c.*, mem.member_role, mem.last_read_message_id, mem.last_delivered_message_id, mem.is_pinned, mem.is_archived, mem.muted_until,
+			        (SELECT COUNT(*) FROM {$g} unread_msg
+			         WHERE unread_msg.conversation_id = c.id AND unread_msg.id > mem.last_read_message_id
+			           AND unread_msg.sender_id <> %d AND unread_msg.deleted_at IS NULL) AS unread,
 			        lm.sender_id AS last_sender_id, lm.content AS last_content, lm.type AS last_type, lm.deleted_at AS last_deleted_at
 			 FROM {$c} c
 			 INNER JOIN {$m} mem ON mem.conversation_id = c.id AND mem.user_id = %d
@@ -246,28 +264,38 @@ final class RCM_REST {
 			 WHERE c.status = 'active'
 			 ORDER BY mem.is_pinned DESC, COALESCE(c.last_message_at,c.created_at) DESC, c.id DESC
 			 LIMIT 200",
+			$user_id,
 			$user_id
 		) );
+
+		$member_map = array();
+		if ( $rows ) {
+			$conversation_ids = array_map( static fn( $row ) => (int) $row->id, $rows );
+			$ids_sql          = implode( ',', array_map( 'absint', $conversation_ids ) );
+			$member_rows      = $wpdb->get_results( "SELECT conversation_id,user_id FROM {$m} WHERE conversation_id IN ({$ids_sql}) ORDER BY joined_at ASC,id ASC" ); // phpcs:ignore WordPress.DB.PreparedSQL.NotPrepared
+			foreach ( $member_rows as $member_row ) {
+				$member_map[ (int) $member_row->conversation_id ][] = (int) $member_row->user_id;
+			}
+		}
+
+		$user_cache = array();
+		foreach ( $member_map as $member_ids ) {
+			foreach ( $member_ids as $member_id ) {
+				if ( ! array_key_exists( $member_id, $user_cache ) ) {
+					$user_cache[ $member_id ] = RCM_DB::user_display( $member_id );
+				}
+			}
+		}
 
 		$out = array();
 		foreach ( $rows as $row ) {
 			$conversation_id = (int) $row->id;
-			$members         = RCM_DB::conversation_members( $conversation_id );
+			$members         = $member_map[ $conversation_id ] ?? array();
 			$other_ids       = array_values( array_diff( $members, array( $user_id ) ) );
-			$member_data     = array_map( array( 'RCM_DB', 'user_display' ), $members );
-			$unread          = (int) $wpdb->get_var( $wpdb->prepare(
-				"SELECT COUNT(*) FROM {$g} WHERE conversation_id = %d AND id > %d AND sender_id <> %d AND deleted_at IS NULL",
-				$conversation_id,
-				(int) $row->last_read_message_id,
-				$user_id
-			) );
-
-			if ( (int) $row->last_message_id > (int) $row->last_delivered_message_id && (int) $row->last_sender_id !== $user_id ) {
-				$wpdb->update( $m, array( 'last_delivered_message_id' => (int) $row->last_message_id ), array( 'conversation_id' => $conversation_id, 'user_id' => $user_id ), array( '%d' ), array( '%d', '%d' ) );
-			}
+			$member_data     = array_map( static fn( $member_id ) => $user_cache[ $member_id ] ?? array(), $members );
 
 			if ( 'direct' === $row->type && ! empty( $other_ids ) ) {
-				$other  = RCM_DB::user_display( (int) $other_ids[0] );
+				$other  = $user_cache[ (int) $other_ids[0] ] ?? array();
 				$title  = $other['name'] ?? __( 'User', 'rolechat-messenger' );
 				$avatar = $other['avatar'] ?? '';
 			} else {
@@ -281,20 +309,20 @@ final class RCM_REST {
 				'title'          => $title,
 				'avatar'         => $avatar,
 				'created_by'     => (int) $row->created_by,
-				'last_message_at'=> $row->last_message_at ?: $row->created_at,
+				'last_message_at'=> self::gmt_mysql_to_iso( (string) ( $row->last_message_at ?: $row->created_at ) ),
 				'last_message_id'=> (int) $row->last_message_id,
 				'last_message'   => $row->last_message_id ? array(
 					'sender_id' => (int) $row->last_sender_id,
 					'content'   => $row->last_deleted_at ? __( 'Message deleted', 'rolechat-messenger' ) : self::preview( (string) $row->last_content, (string) $row->last_type ),
 					'type'      => $row->last_type,
 				) : null,
-				'unread'         => $unread,
+				'unread'         => (int) $row->unread,
 				'is_pinned'      => (bool) $row->is_pinned,
 				'is_archived'    => (bool) $row->is_archived,
 				'muted_until'    => $row->muted_until,
 				'members'        => array_values( array_filter( $member_data ) ),
-				'can_manage'     => 'group' === $row->type && RCM_Permissions::can_manage_group( $user_id, $conversation_id ),
-				'typing'         => self::typing_users( $conversation_id, $user_id ),
+				'can_manage'     => 'group' === $row->type && in_array( $row->member_role, array( 'owner', 'admin' ), true ),
+				'typing'         => self::typing_users( $conversation_id, $user_id, $members ),
 			);
 		}
 		return $out;
@@ -319,8 +347,11 @@ final class RCM_REST {
 			global $wpdb;
 			$m   = RCM_DB::table( 'members' );
 			$now = RCM_DB::now();
-			$wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $existing, $sender_id, $now ) );
-			$wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $existing, $recipient_id, $now ) );
+			$sender_added    = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $existing, $sender_id, $now ) );
+			$recipient_added = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $existing, $recipient_id, $now ) );
+			if ( false === $sender_added || false === $recipient_added || ! RCM_DB::is_member( $existing, $sender_id ) || ! RCM_DB::is_member( $existing, $recipient_id ) ) {
+				return new WP_Error( 'rcm_db_error', __( 'Could not restore conversation membership.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+			}
 			return rest_ensure_response( array( 'conversation_id' => $existing, 'existing' => true ) );
 		}
 
@@ -357,7 +388,10 @@ final class RCM_REST {
 		if ( '' === $title || empty( $member_ids ) ) {
 			return new WP_Error( 'rcm_invalid_group', __( 'A group title and at least one participant are required.', 'rolechat-messenger' ), array( 'status' => 400 ) );
 		}
-		if ( count( $member_ids ) > 199 ) {
+		if ( self::text_length( $title ) > self::MAX_GROUP_TITLE_LENGTH ) {
+			return new WP_Error( 'rcm_group_title_too_long', __( 'The group title is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
+		if ( count( $member_ids ) >= self::MAX_GROUP_MEMBERS ) {
 			return new WP_Error( 'rcm_group_too_large', __( 'A group can contain at most 200 members.', 'rolechat-messenger' ), array( 'status' => 400 ) );
 		}
 		foreach ( $member_ids as $member_id ) {
@@ -367,6 +401,9 @@ final class RCM_REST {
 		}
 		if ( ! self::group_members_compatible( array_merge( array( $user_id ), $member_ids ) ) ) {
 			return new WP_Error( 'rcm_group_matrix_conflict', __( 'The selected group contains role combinations that are not mutually allowed to exchange messages.', 'rolechat-messenger' ), array( 'status' => 403 ) );
+		}
+		if ( ! RCM_Permissions::rate_limit_ok( $user_id, 'group_create', 5 ) ) {
+			return new WP_Error( 'rcm_rate_limited', __( 'Too many groups were created. Please wait before trying again.', 'rolechat-messenger' ), array( 'status' => 429 ) );
 		}
 		global $wpdb;
 		$c   = RCM_DB::table( 'conversations' );
@@ -440,7 +477,7 @@ final class RCM_REST {
 			return new WP_Error( 'rcm_forbidden_conversation', __( 'You cannot access this conversation.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		$q = sanitize_text_field( (string) $request->get_param( 'q' ) );
-		if ( mb_strlen( $q ) < 2 ) {
+		if ( self::text_length( $q ) < 2 ) {
 			return rest_ensure_response( array( 'messages' => array() ) );
 		}
 		global $wpdb;
@@ -457,11 +494,15 @@ final class RCM_REST {
 		$reply_to_id     = absint( $request->get_param( 'reply_to_id' ) );
 		$attachment_ids  = array_slice( array_values( array_unique( array_filter( array_map( 'absint', (array) $request->get_param( 'attachment_ids' ) ) ) ) ), 0, 10 );
 		$has_attachment  = ! empty( $attachment_ids );
+		$has_text        = '' !== trim( $content );
 
-		if ( '' === trim( $content ) && ! $has_attachment ) {
+		if ( ! $has_text && ! $has_attachment ) {
 			return new WP_Error( 'rcm_empty_message', __( 'Message cannot be empty.', 'rolechat-messenger' ), array( 'status' => 400 ) );
 		}
-		if ( ! RCM_Permissions::can_send_to_conversation( $user_id, $conversation_id, $has_attachment ) ) {
+		if ( self::text_length( $content ) > self::MAX_MESSAGE_LENGTH ) {
+			return new WP_Error( 'rcm_message_too_long', __( 'The message is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
+		if ( ! RCM_Permissions::can_send_to_conversation( $user_id, $conversation_id, $has_attachment, $has_text ) ) {
 			return new WP_Error( 'rcm_send_forbidden', __( 'Your role is not allowed to send this message to all participants in this conversation.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		if ( ! RCM_Permissions::rate_limit_ok( $user_id ) ) {
@@ -483,7 +524,7 @@ final class RCM_REST {
 		$valid_attachments = array();
 		if ( $attachment_ids ) {
 			$ids_sql = implode( ',', array_map( 'absint', $attachment_ids ) );
-			$valid_attachments = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$a} WHERE id IN ({$ids_sql}) AND uploader_id = %d AND message_id = 0", $user_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			$valid_attachments = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$a} WHERE id IN ({$ids_sql}) AND uploader_id = %d AND conversation_id = %d AND message_id = 0", $user_id, $conversation_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
 		}
 
 		if ( '' === trim( $content ) && empty( $valid_attachments ) ) {
@@ -506,11 +547,30 @@ final class RCM_REST {
 			return new WP_Error( 'rcm_db_error', __( 'Could not save the message.', 'rolechat-messenger' ), array( 'status' => 500 ) );
 		}
 
+		$claimed_attachment_ids = array();
 		foreach ( $valid_attachments as $attachment ) {
-			$wpdb->update( $a, array( 'message_id' => $message_id ), array( 'id' => (int) $attachment->id, 'uploader_id' => $user_id, 'message_id' => 0 ), array( '%d' ), array( '%d', '%d', '%d' ) );
+			$attachment_id = (int) $attachment->id;
+			$claimed = $wpdb->update( $a, array( 'message_id' => $message_id ), array( 'id' => $attachment_id, 'uploader_id' => $user_id, 'conversation_id' => $conversation_id, 'message_id' => 0 ), array( '%d' ), array( '%d', '%d', '%d', '%d' ) );
+			if ( 1 !== $claimed ) {
+				if ( $claimed_attachment_ids ) {
+					$claimed_sql = implode( ',', array_map( 'absint', $claimed_attachment_ids ) );
+					$wpdb->query( $wpdb->prepare( "UPDATE {$a} SET message_id = 0 WHERE message_id = %d AND id IN ({$claimed_sql})", $message_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				}
+				$wpdb->delete( $g, array( 'id' => $message_id ), array( '%d' ) );
+				return new WP_Error( 'rcm_attachment_conflict', __( 'One or more attachments were already used or could not be attached. Please upload them again.', 'rolechat-messenger' ), array( 'status' => 409 ) );
+			}
+			$claimed_attachment_ids[] = $attachment_id;
 		}
 
-		$wpdb->update( $c, array( 'updated_at' => $now, 'last_message_at' => $now, 'last_message_id' => $message_id ), array( 'id' => $conversation_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
+		$conversation_updated = $wpdb->update( $c, array( 'updated_at' => $now, 'last_message_at' => $now, 'last_message_id' => $message_id ), array( 'id' => $conversation_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
+		if ( false === $conversation_updated ) {
+			if ( $claimed_attachment_ids ) {
+				$claimed_sql = implode( ',', array_map( 'absint', $claimed_attachment_ids ) );
+				$wpdb->query( $wpdb->prepare( "UPDATE {$a} SET message_id = 0 WHERE message_id = %d AND id IN ({$claimed_sql})", $message_id ) ); // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+			}
+			$wpdb->delete( $g, array( 'id' => $message_id ), array( '%d' ) );
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the conversation after sending the message.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		do_action( 'rcm_after_send_message', $message_id, $conversation_id, $user_id );
 		$row = $wpdb->get_row( $wpdb->prepare( "SELECT * FROM {$g} WHERE id = %d", $message_id ) );
 		return rest_ensure_response( array( 'message' => self::serialize_message( $row, $user_id ) ) );
@@ -541,6 +601,13 @@ final class RCM_REST {
 		}
 		$timestamp = strtotime( $value . ' UTC' );
 		return $timestamp ? gmdate( DATE_ATOM, $timestamp ) : null;
+	}
+
+	private static function text_length( string $value ): int {
+		if ( function_exists( 'mb_strlen' ) ) {
+			return mb_strlen( $value, 'UTF-8' );
+		}
+		return preg_match_all( '/./us', $value, $matches ) ?: 0;
 	}
 
 	private static function serialize_message( object $row, int $viewer_id ): array {
@@ -630,7 +697,10 @@ final class RCM_REST {
 		$m = RCM_DB::table( 'members' );
 		$max_id = (int) $wpdb->get_var( $wpdb->prepare( "SELECT MAX(id) FROM {$g} WHERE conversation_id = %d", $conversation_id ) );
 		$message_id = $message_id ? min( $message_id, $max_id ) : $max_id;
-		$wpdb->query( $wpdb->prepare( "UPDATE {$m} SET last_read_message_id = GREATEST(last_read_message_id,%d), last_delivered_message_id = GREATEST(last_delivered_message_id,%d) WHERE conversation_id = %d AND user_id = %d", $message_id, $message_id, $conversation_id, $user_id ) );
+		$updated = $wpdb->query( $wpdb->prepare( "UPDATE {$m} SET last_read_message_id = GREATEST(last_read_message_id,%d), last_delivered_message_id = GREATEST(last_delivered_message_id,%d) WHERE conversation_id = %d AND user_id = %d", $message_id, $message_id, $conversation_id, $user_id ) );
+		if ( false === $updated ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the read state.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		return rest_ensure_response( array( 'read' => $message_id ) );
 	}
 
@@ -645,13 +715,16 @@ final class RCM_REST {
 		if ( null !== $request->get_param( 'is_pinned' ) ) { $data['is_pinned'] = rest_sanitize_boolean( $request->get_param( 'is_pinned' ) ) ? 1 : 0; $formats[] = '%d'; }
 		if ( null !== $request->get_param( 'is_archived' ) ) { $data['is_archived'] = rest_sanitize_boolean( $request->get_param( 'is_archived' ) ) ? 1 : 0; $formats[] = '%d'; }
 		if ( null !== $request->get_param( 'muted_minutes' ) ) {
-			$minutes = max( 0, absint( $request->get_param( 'muted_minutes' ) ) );
+			$minutes = min( 525600, max( 0, absint( $request->get_param( 'muted_minutes' ) ) ) );
 			$data['muted_until'] = $minutes ? gmdate( 'Y-m-d H:i:s', time() + $minutes * MINUTE_IN_SECONDS ) : null;
 			$formats[] = '%s';
 		}
 		if ( empty( $data ) ) { return rest_ensure_response( array( 'updated' => false ) ); }
 		global $wpdb;
-		$wpdb->update( RCM_DB::table( 'members' ), $data, array( 'conversation_id' => $conversation_id, 'user_id' => $user_id ), $formats, array( '%d', '%d' ) );
+		$updated = $wpdb->update( RCM_DB::table( 'members' ), $data, array( 'conversation_id' => $conversation_id, 'user_id' => $user_id ), $formats, array( '%d', '%d' ) );
+		if ( false === $updated ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the conversation state.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		return rest_ensure_response( array( 'updated' => true ) );
 	}
 
@@ -667,9 +740,9 @@ final class RCM_REST {
 		return rest_ensure_response( array( 'typing' => $is_typing ) );
 	}
 
-	private static function typing_users( int $conversation_id, int $viewer_id ): array {
+	private static function typing_users( int $conversation_id, int $viewer_id, ?array $member_ids = null ): array {
 		$out = array();
-		foreach ( RCM_DB::conversation_members( $conversation_id ) as $member_id ) {
+		foreach ( $member_ids ?? RCM_DB::conversation_members( $conversation_id ) as $member_id ) {
 			if ( $member_id === $viewer_id ) { continue; }
 			if ( get_transient( 'rcm_typing_' . $conversation_id . '_' . $member_id ) ) {
 				$user = RCM_DB::user_display( $member_id );
@@ -684,19 +757,32 @@ final class RCM_REST {
 		$conversation_id = absint( $request['id'] );
 		$target_id       = absint( $request->get_param( 'user_id' ) );
 		$conversation    = RCM_DB::conversation_row( $conversation_id );
-		if ( ! $conversation || 'group' !== $conversation->type || ! RCM_Permissions::can_manage_group( $user_id, $conversation_id ) ) {
+		if ( ! $conversation || 'group' !== $conversation->type || 'active' !== $conversation->status || ! RCM_Permissions::can_manage_group( $user_id, $conversation_id ) ) {
 			return new WP_Error( 'rcm_group_forbidden', __( 'You cannot manage this group.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		if ( ! RCM_Permissions::can_initiate( $user_id, $target_id ) ) {
 			return new WP_Error( 'rcm_member_not_allowed', __( 'The role permission matrix does not allow adding this user.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
-		$prospective_members = array_merge( RCM_DB::conversation_members( $conversation_id ), array( $target_id ) );
+		$current_members = RCM_DB::conversation_members( $conversation_id );
+		if ( in_array( $target_id, $current_members, true ) ) {
+			return rest_ensure_response( array( 'added' => false, 'existing' => true ) );
+		}
+		if ( count( $current_members ) >= self::MAX_GROUP_MEMBERS ) {
+			return new WP_Error( 'rcm_group_too_large', __( 'A group can contain at most 200 members.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
+		$prospective_members = array_merge( $current_members, array( $target_id ) );
 		if ( ! self::group_members_compatible( $prospective_members ) ) {
 			return new WP_Error( 'rcm_group_matrix_conflict', __( 'This user cannot join the group because one or more role-to-role messaging directions are disabled.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		global $wpdb;
 		$m = RCM_DB::table( 'members' );
-		$wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $conversation_id, $target_id, RCM_DB::now() ) );
+		$inserted = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$m} (conversation_id,user_id,member_role,joined_at) VALUES (%d,%d,'member',%s)", $conversation_id, $target_id, RCM_DB::now() ) );
+		if ( false === $inserted ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not add the group member.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
+		if ( 0 === $inserted ) {
+			return rest_ensure_response( array( 'added' => false, 'existing' => true ) );
+		}
 		RCM_DB::audit( $user_id, 'group_member_added', 'conversation', $conversation_id, array( 'user_id' => $target_id ) );
 		return rest_ensure_response( array( 'added' => true ) );
 	}
@@ -719,15 +805,24 @@ final class RCM_REST {
 		}
 		global $wpdb;
 		$members_table = RCM_DB::table( 'members' );
+		$conversations_table = RCM_DB::table( 'conversations' );
+		$wpdb->query( 'START TRANSACTION' );
+		$operation_ok = true;
 		if ( 'owner' === $target_member->member_role && $target_id === $user_id ) {
-			$replacement = (int) $wpdb->get_var( $wpdb->prepare( "SELECT user_id FROM {$members_table} WHERE conversation_id = %d AND user_id <> %d ORDER BY (member_role='admin') DESC, joined_at ASC LIMIT 1", $conversation_id, $target_id ) );
+			$replacement = (int) $wpdb->get_var( $wpdb->prepare( "SELECT user_id FROM {$members_table} WHERE conversation_id = %d AND user_id <> %d ORDER BY (member_role='admin') DESC, joined_at ASC LIMIT 1 FOR UPDATE", $conversation_id, $target_id ) );
 			if ( $replacement ) {
-				$wpdb->update( $members_table, array( 'member_role' => 'owner' ), array( 'conversation_id' => $conversation_id, 'user_id' => $replacement ), array( '%s' ), array( '%d', '%d' ) );
+				$operation_ok = false !== $wpdb->update( $members_table, array( 'member_role' => 'owner' ), array( 'conversation_id' => $conversation_id, 'user_id' => $replacement ), array( '%s' ), array( '%d', '%d' ) );
+				$operation_ok = $operation_ok && false !== $wpdb->update( $conversations_table, array( 'created_by' => $replacement, 'updated_at' => RCM_DB::now() ), array( 'id' => $conversation_id ), array( '%d', '%s' ), array( '%d' ) );
 			} else {
-				$wpdb->update( RCM_DB::table( 'conversations' ), array( 'status' => 'deleted', 'updated_at' => RCM_DB::now() ), array( 'id' => $conversation_id ), array( '%s', '%s' ), array( '%d' ) );
+				$operation_ok = false !== $wpdb->update( $conversations_table, array( 'status' => 'deleted', 'updated_at' => RCM_DB::now() ), array( 'id' => $conversation_id ), array( '%s', '%s' ), array( '%d' ) );
 			}
 		}
-		$wpdb->delete( $members_table, array( 'conversation_id' => $conversation_id, 'user_id' => $target_id ), array( '%d', '%d' ) );
+		$removed = $operation_ok ? $wpdb->delete( $members_table, array( 'conversation_id' => $conversation_id, 'user_id' => $target_id ), array( '%d', '%d' ) ) : false;
+		if ( false === $removed || 0 === $removed ) {
+			$wpdb->query( 'ROLLBACK' );
+			return new WP_Error( 'rcm_db_error', __( 'Could not remove the group member.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
+		$wpdb->query( 'COMMIT' );
 		RCM_DB::audit( $user_id, 'group_member_removed', 'conversation', $conversation_id, array( 'user_id' => $target_id ) );
 		return rest_ensure_response( array( 'removed' => true ) );
 	}
@@ -755,24 +850,33 @@ final class RCM_REST {
 		if ( '' === trim( $content ) ) {
 			return new WP_Error( 'rcm_empty_message', __( 'Message cannot be empty.', 'rolechat-messenger' ), array( 'status' => 400 ) );
 		}
+		if ( self::text_length( $content ) > self::MAX_MESSAGE_LENGTH ) {
+			return new WP_Error( 'rcm_message_too_long', __( 'The message is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
 		global $wpdb;
-		$wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => $content, 'edited_at' => RCM_DB::now() ), array( 'id' => $message_id ), array( '%s', '%s' ), array( '%d' ) );
+		$updated = $wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => $content, 'edited_at' => RCM_DB::now() ), array( 'id' => $message_id ), array( '%s', '%s' ), array( '%d' ) );
+		if ( false === $updated ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the message.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'message_edited', 'message', $message_id );
 		return rest_ensure_response( array( 'message' => self::serialize_message( self::get_message_row( $message_id ), $user_id ) ) );
 	}
 
-	public static function purge_message_attachments( int $message_id ): void {
+	public static function purge_message_attachments( int $message_id ): bool {
 		global $wpdb;
 		$table = RCM_DB::table( 'attachments' );
 		$rows = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$table} WHERE message_id = %d", $message_id ) );
-		if ( empty( $rows ) ) { return; }
-		$wpdb->delete( $table, array( 'message_id' => $message_id ), array( '%d' ) );
+		if ( empty( $rows ) ) { return true; }
+		if ( false === $wpdb->delete( $table, array( 'message_id' => $message_id ), array( '%d' ) ) ) {
+			return false;
+		}
 		foreach ( $rows as $row ) {
 			$still_referenced = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$table} WHERE storage_key = %s", (string) $row->storage_key ) );
 			if ( 0 === $still_referenced ) {
 				RCM_Attachments::delete_storage( (string) $row->storage_key );
 			}
 		}
+		return true;
 	}
 
 	public static function delete_message( WP_REST_Request $request ): WP_REST_Response|WP_Error {
@@ -794,8 +898,13 @@ final class RCM_REST {
 			}
 		}
 		global $wpdb;
-		self::purge_message_attachments( $message_id );
-		$wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => '', 'deleted_at' => RCM_DB::now(), 'deleted_by' => $user_id ), array( 'id' => $message_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
+		$deleted = $wpdb->update( RCM_DB::table( 'messages' ), array( 'content' => '', 'deleted_at' => RCM_DB::now(), 'deleted_by' => $user_id ), array( 'id' => $message_id ), array( '%s', '%s', '%d' ), array( '%d' ) );
+		if ( false === $deleted ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not delete the message.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
+		if ( ! self::purge_message_attachments( $message_id ) ) {
+			return new WP_Error( 'rcm_attachment_cleanup', __( 'The message was deleted, but its attachment metadata could not be removed. Please try again.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'message_deleted', 'message', $message_id, array( 'moderator' => $is_moderator ) );
 		return rest_ensure_response( array( 'deleted' => true ) );
 	}
@@ -814,7 +923,9 @@ final class RCM_REST {
 		$g = RCM_DB::table( 'messages' );
 		$c = RCM_DB::table( 'conversations' );
 		$attachments = $wpdb->get_results( $wpdb->prepare( "SELECT * FROM {$a} WHERE message_id = %d ORDER BY id ASC", $message_id ) );
-		if ( ! RCM_Permissions::can_send_to_conversation( $user_id, $target_conversation_id, ! empty( $attachments ) ) ) {
+		$has_attachments = ! empty( $attachments );
+		$has_text        = '' !== trim( (string) $row->content );
+		if ( ! RCM_Permissions::can_send_to_conversation( $user_id, $target_conversation_id, $has_attachments, $has_text ) ) {
 			return new WP_Error( 'rcm_forward_target_forbidden', __( 'You cannot forward this message to that conversation.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		if ( ! RCM_Permissions::rate_limit_ok( $user_id ) ) {
@@ -834,8 +945,9 @@ final class RCM_REST {
 			return new WP_Error( 'rcm_db_error', __( 'Could not forward the message.', 'rolechat-messenger' ), array( 'status' => 500 ) );
 		}
 		foreach ( $attachments as $att ) {
-			$wpdb->insert( $a, array(
+			$copied = $wpdb->insert( $a, array(
 				'message_id' => $new_id,
+				'conversation_id' => $target_conversation_id,
 				'attachment_id' => 0,
 				'uploader_id' => $user_id,
 				'storage_key' => (string) $att->storage_key,
@@ -843,9 +955,19 @@ final class RCM_REST {
 				'mime_type' => $att->mime_type,
 				'file_size' => (int) $att->file_size,
 				'created_at' => $now,
-			), array( '%d','%d','%d','%s','%s','%s','%d','%s' ) );
+			), array( '%d','%d','%d','%d','%s','%s','%s','%d','%s' ) );
+			if ( false === $copied ) {
+				$wpdb->delete( $a, array( 'message_id' => $new_id ), array( '%d' ) );
+				$wpdb->delete( $g, array( 'id' => $new_id ), array( '%d' ) );
+				return new WP_Error( 'rcm_db_error', __( 'Could not copy the forwarded attachments.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+			}
 		}
-		$wpdb->update( $c, array( 'updated_at' => $now, 'last_message_at' => $now, 'last_message_id' => $new_id ), array( 'id' => $target_conversation_id ), array( '%s','%s','%d' ), array( '%d' ) );
+		$updated = $wpdb->update( $c, array( 'updated_at' => $now, 'last_message_at' => $now, 'last_message_id' => $new_id ), array( 'id' => $target_conversation_id ), array( '%s','%s','%d' ), array( '%d' ) );
+		if ( false === $updated ) {
+			$wpdb->delete( $a, array( 'message_id' => $new_id ), array( '%d' ) );
+			$wpdb->delete( $g, array( 'id' => $new_id ), array( '%d' ) );
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the destination conversation.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'message_forwarded', 'message', $message_id, array( 'to_conversation' => $target_conversation_id, 'new_message_id' => $new_id ) );
 		return rest_ensure_response( array( 'message' => self::serialize_message( self::get_message_row( $new_id ), $user_id ) ) );
 	}
@@ -855,7 +977,7 @@ final class RCM_REST {
 		$message_id = absint( $request['id'] );
 		$row        = self::get_message_row( $message_id );
 		$settings   = RCM_Permissions::settings();
-		if ( empty( $settings['allow_reactions'] ) || ! $row || ! RCM_DB::is_member( (int) $row->conversation_id, $user_id ) || ! RCM_Permissions::can_send_to_conversation( $user_id, (int) $row->conversation_id, false ) ) {
+		if ( empty( $settings['allow_reactions'] ) || ! $row || ! empty( $row->deleted_at ) || ! RCM_DB::is_member( (int) $row->conversation_id, $user_id ) || ! RCM_Permissions::can_send_to_conversation( $user_id, (int) $row->conversation_id, false ) ) {
 			return new WP_Error( 'rcm_reaction_forbidden', __( 'You cannot react to this message.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		$reaction = (string) $request->get_param( 'reaction' );
@@ -867,11 +989,14 @@ final class RCM_REST {
 		$r = RCM_DB::table( 'reactions' );
 		$exists = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$r} WHERE message_id = %d AND user_id = %d AND reaction = %s", $message_id, $user_id, $reaction ) );
 		if ( $exists ) {
-			$wpdb->delete( $r, array( 'id' => $exists ), array( '%d' ) );
+			$changed = $wpdb->delete( $r, array( 'id' => $exists ), array( '%d' ) );
 			$active = false;
 		} else {
-			$wpdb->insert( $r, array( 'message_id' => $message_id, 'user_id' => $user_id, 'reaction' => $reaction, 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%s', '%s' ) );
+			$changed = $wpdb->insert( $r, array( 'message_id' => $message_id, 'user_id' => $user_id, 'reaction' => $reaction, 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%s', '%s' ) );
 			$active = true;
+		}
+		if ( false === $changed ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the reaction.', 'rolechat-messenger' ), array( 'status' => 500 ) );
 		}
 		return rest_ensure_response( array( 'active' => $active, 'message' => self::serialize_message( self::get_message_row( $message_id ), $user_id ) ) );
 	}
@@ -880,12 +1005,26 @@ final class RCM_REST {
 		$user_id    = get_current_user_id();
 		$message_id = absint( $request['id'] );
 		$row        = self::get_message_row( $message_id );
-		if ( ! $row || ! RCM_DB::is_member( (int) $row->conversation_id, $user_id ) ) {
+		if ( ! $row || ! empty( $row->deleted_at ) || (int) $row->sender_id === $user_id || ! RCM_DB::is_member( (int) $row->conversation_id, $user_id ) ) {
 			return new WP_Error( 'rcm_report_forbidden', __( 'You cannot report this message.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 		}
 		$reason = sanitize_textarea_field( (string) $request->get_param( 'reason' ) );
+		if ( self::text_length( $reason ) > self::MAX_REPORT_REASON_LENGTH ) {
+			return new WP_Error( 'rcm_report_reason_too_long', __( 'The report reason is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
 		global $wpdb;
-		$wpdb->insert( RCM_DB::table( 'reports' ), array( 'reporter_id' => $user_id, 'message_id' => $message_id, 'reason' => $reason, 'status' => 'open', 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%s', '%s', '%s' ) );
+		$reports = RCM_DB::table( 'reports' );
+		$existing = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$reports} WHERE reporter_id = %d AND message_id = %d AND status = 'open' LIMIT 1", $user_id, $message_id ) );
+		if ( $existing ) {
+			return rest_ensure_response( array( 'reported' => true, 'existing' => true ) );
+		}
+		if ( ! RCM_Permissions::rate_limit_ok( $user_id, 'report', 10 ) ) {
+			return new WP_Error( 'rcm_rate_limited', __( 'Too many reports were submitted. Please wait before trying again.', 'rolechat-messenger' ), array( 'status' => 429 ) );
+		}
+		$inserted = $wpdb->insert( $reports, array( 'reporter_id' => $user_id, 'message_id' => $message_id, 'reason' => $reason, 'status' => 'open', 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%s', '%s', '%s' ) );
+		if ( false === $inserted ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not submit the report.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'message_reported', 'message', $message_id );
 		return rest_ensure_response( array( 'reported' => true ) );
 	}
@@ -900,8 +1039,12 @@ final class RCM_REST {
 		if ( ! RCM_Attachments::encryption_available() ) {
 			return new WP_Error( 'rcm_secure_upload_unavailable', __( 'Secure attachments require the PHP Sodium extension on this server.', 'rolechat-messenger' ), array( 'status' => 503 ) );
 		}
-		if ( ! $conversation_id || ! RCM_Permissions::can_send_to_conversation( $user_id, $conversation_id, true ) ) {
+		if ( ! $conversation_id || ! RCM_Permissions::can_send_to_conversation( $user_id, $conversation_id, true, false ) ) {
 			return new WP_Error( 'rcm_upload_forbidden', __( 'You are not allowed to upload an attachment to this conversation.', 'rolechat-messenger' ), array( 'status' => 403 ) );
+		}
+		$upload_limit = max( 1, (int) $settings['upload_rate_limit_per_minute'] );
+		if ( ! RCM_Permissions::rate_limit_ok( $user_id, 'upload', $upload_limit ) ) {
+			return new WP_Error( 'rcm_rate_limited', __( 'Too many attachments were uploaded. Please wait before trying again.', 'rolechat-messenger' ), array( 'status' => 429 ) );
 		}
 		if ( empty( $_FILES['file'] ) || ! is_array( $_FILES['file'] ) ) {
 			return new WP_Error( 'rcm_upload_missing', __( 'No file was uploaded.', 'rolechat-messenger' ), array( 'status' => 400 ) );
@@ -915,6 +1058,9 @@ final class RCM_REST {
 			return new WP_Error( 'rcm_upload_too_large', __( 'The uploaded file is empty or exceeds the configured size limit.', 'rolechat-messenger' ), array( 'status' => 413 ) );
 		}
 		$file_name    = sanitize_file_name( (string) $file['name'] );
+		if ( '' === $file_name || self::text_length( $file_name ) > 240 ) {
+			return new WP_Error( 'rcm_upload_name', __( 'The attachment file name is invalid or too long.', 'rolechat-messenger' ), array( 'status' => 400 ) );
+		}
 		$allowed_exts = array_filter( array_map( 'sanitize_key', array_map( 'trim', explode( ',', strtolower( (string) $settings['allowed_extensions'] ) ) ) ) );
 		$ext          = strtolower( pathinfo( $file_name, PATHINFO_EXTENSION ) );
 		if ( ! in_array( $ext, $allowed_exts, true ) ) {
@@ -940,6 +1086,7 @@ final class RCM_REST {
 		$table = RCM_DB::table( 'attachments' );
 		$inserted = $wpdb->insert( $table, array(
 			'message_id'    => 0,
+			'conversation_id' => $conversation_id,
 			'attachment_id' => 0,
 			'uploader_id'   => $user_id,
 			'storage_key'   => $storage_key,
@@ -947,7 +1094,7 @@ final class RCM_REST {
 			'mime_type'     => sanitize_mime_type( (string) $checked['type'] ),
 			'file_size'     => (int) $file['size'],
 			'created_at'    => RCM_DB::now(),
-		), array( '%d','%d','%d','%s','%s','%s','%d','%s' ) );
+		), array( '%d','%d','%d','%d','%s','%s','%s','%d','%s' ) );
 		if ( false === $inserted ) {
 			RCM_Attachments::delete_storage( $storage_key );
 			return new WP_Error( 'rcm_upload_db', __( 'The encrypted attachment metadata could not be saved.', 'rolechat-messenger' ), array( 'status' => 500 ) );
@@ -998,8 +1145,13 @@ final class RCM_REST {
 			exit;
 		}
 		$path = RCM_Attachments::path( (string) $row->storage_key );
-		if ( ! is_file( $path ) ) {
+		if ( '' === $path || ! is_file( $path ) ) {
 			status_header( 404 );
+			exit;
+		}
+		$stream = RCM_Attachments::decrypted_stream( (string) $row->storage_key );
+		if ( false === $stream ) {
+			status_header( 500 );
 			exit;
 		}
 		while ( ob_get_level() ) {
@@ -1014,9 +1166,8 @@ final class RCM_REST {
 		header( 'X-Content-Type-Options: nosniff' );
 		header( 'Cache-Control: private, no-store, max-age=0' );
 		header( 'Pragma: no-cache' );
-		if ( ! RCM_Attachments::stream_decrypted( (string) $row->storage_key ) ) {
-			status_header( 500 );
-		}
+		fpassthru( $stream );
+		fclose( $stream );
 		exit;
 	}
 
@@ -1045,7 +1196,7 @@ final class RCM_REST {
 		);
 		if ( '' !== $search ) {
 			$args['search'] = '*' . $search . '*';
-			$args['search_columns'] = array( 'user_login', 'user_nicename', 'user_email', 'display_name' );
+			$args['search_columns'] = array( 'user_login', 'user_nicename', 'display_name' );
 		}
 		$query = new WP_User_Query( $args );
 		$out   = array();
@@ -1103,16 +1254,22 @@ final class RCM_REST {
 		$t = RCM_DB::table( 'contacts' );
 		$existing = (int) $wpdb->get_var( $wpdb->prepare( "SELECT id FROM {$t} WHERE user_id = %d AND contact_user_id = %d", $user_id, $contact_id ) );
 		if ( $existing ) {
-			$wpdb->update( $t, array( 'category_id' => $category_id ), array( 'id' => $existing ), array( '%d' ), array( '%d' ) );
+			$saved = $wpdb->update( $t, array( 'category_id' => $category_id ), array( 'id' => $existing ), array( '%d' ), array( '%d' ) );
 		} else {
-			$wpdb->insert( $t, array( 'user_id' => $user_id, 'contact_user_id' => $contact_id, 'category_id' => $category_id, 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%d', '%s' ) );
+			$saved = $wpdb->insert( $t, array( 'user_id' => $user_id, 'contact_user_id' => $contact_id, 'category_id' => $category_id, 'created_at' => RCM_DB::now() ), array( '%d', '%d', '%d', '%s' ) );
+		}
+		if ( false === $saved ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not save the contact.', 'rolechat-messenger' ), array( 'status' => 500 ) );
 		}
 		return rest_ensure_response( array( 'contacts' => self::contact_list( $user_id ) ) );
 	}
 
-	public static function delete_contact( WP_REST_Request $request ): WP_REST_Response {
+	public static function delete_contact( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		global $wpdb;
-		$wpdb->delete( RCM_DB::table( 'contacts' ), array( 'user_id' => get_current_user_id(), 'contact_user_id' => absint( $request['user_id'] ) ), array( '%d', '%d' ) );
+		$deleted = $wpdb->delete( RCM_DB::table( 'contacts' ), array( 'user_id' => get_current_user_id(), 'contact_user_id' => absint( $request['user_id'] ) ), array( '%d', '%d' ) );
+		if ( false === $deleted ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not delete the contact.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		return rest_ensure_response( array( 'deleted' => true ) );
 	}
 
@@ -1131,8 +1288,13 @@ final class RCM_REST {
 		$user_id = get_current_user_id();
 		$name = sanitize_text_field( (string) $request->get_param( 'name' ) );
 		if ( '' === $name ) { return new WP_Error( 'rcm_category_name', __( 'Category name is required.', 'rolechat-messenger' ), array( 'status' => 400 ) ); }
+		if ( self::text_length( $name ) > self::MAX_CATEGORY_NAME_LENGTH ) { return new WP_Error( 'rcm_category_name', __( 'The category name is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) ); }
 		global $wpdb;
-		$wpdb->insert( RCM_DB::table( 'contact_categories' ), array( 'user_id' => $user_id, 'name' => $name, 'sort_order' => 0, 'created_at' => RCM_DB::now() ), array( '%d', '%s', '%d', '%s' ) );
+		$count = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM " . RCM_DB::table( 'contact_categories' ) . " WHERE user_id = %d", $user_id ) );
+		if ( $count >= 100 ) { return new WP_Error( 'rcm_category_limit', __( 'You cannot create more than 100 contact categories.', 'rolechat-messenger' ), array( 'status' => 400 ) ); }
+		if ( false === $wpdb->insert( RCM_DB::table( 'contact_categories' ), array( 'user_id' => $user_id, 'name' => $name, 'sort_order' => 0, 'created_at' => RCM_DB::now() ), array( '%d', '%s', '%d', '%s' ) ) ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not create the category.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		return rest_ensure_response( array( 'categories' => self::category_list( $user_id ) ) );
 	}
 
@@ -1141,17 +1303,26 @@ final class RCM_REST {
 		$id = absint( $request['id'] );
 		$name = sanitize_text_field( (string) $request->get_param( 'name' ) );
 		if ( '' === $name ) { return new WP_Error( 'rcm_category_name', __( 'Category name is required.', 'rolechat-messenger' ), array( 'status' => 400 ) ); }
+		if ( self::text_length( $name ) > self::MAX_CATEGORY_NAME_LENGTH ) { return new WP_Error( 'rcm_category_name', __( 'The category name is too long.', 'rolechat-messenger' ), array( 'status' => 400 ) ); }
 		global $wpdb;
-		$wpdb->update( RCM_DB::table( 'contact_categories' ), array( 'name' => $name ), array( 'id' => $id, 'user_id' => $user_id ), array( '%s' ), array( '%d', '%d' ) );
+		if ( false === $wpdb->update( RCM_DB::table( 'contact_categories' ), array( 'name' => $name ), array( 'id' => $id, 'user_id' => $user_id ), array( '%s' ), array( '%d', '%d' ) ) ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not update the category.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		return rest_ensure_response( array( 'categories' => self::category_list( $user_id ) ) );
 	}
 
-	public static function delete_category( WP_REST_Request $request ): WP_REST_Response {
+	public static function delete_category( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		$user_id = get_current_user_id();
 		$id = absint( $request['id'] );
 		global $wpdb;
-		$wpdb->update( RCM_DB::table( 'contacts' ), array( 'category_id' => 0 ), array( 'user_id' => $user_id, 'category_id' => $id ), array( '%d' ), array( '%d', '%d' ) );
-		$wpdb->delete( RCM_DB::table( 'contact_categories' ), array( 'id' => $id, 'user_id' => $user_id ), array( '%d', '%d' ) );
+		$wpdb->query( 'START TRANSACTION' );
+		$contacts_updated = $wpdb->update( RCM_DB::table( 'contacts' ), array( 'category_id' => 0 ), array( 'user_id' => $user_id, 'category_id' => $id ), array( '%d' ), array( '%d', '%d' ) );
+		$category_deleted = false !== $contacts_updated ? $wpdb->delete( RCM_DB::table( 'contact_categories' ), array( 'id' => $id, 'user_id' => $user_id ), array( '%d', '%d' ) ) : false;
+		if ( false === $category_deleted ) {
+			$wpdb->query( 'ROLLBACK' );
+			return new WP_Error( 'rcm_db_error', __( 'Could not delete the category.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
+		$wpdb->query( 'COMMIT' );
 		return rest_ensure_response( array( 'deleted' => true ) );
 	}
 
@@ -1167,16 +1338,21 @@ final class RCM_REST {
 		}
 		global $wpdb;
 		$t = RCM_DB::table( 'blocks' );
-		$wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$t} (user_id,blocked_user_id,created_at) VALUES (%d,%d,%s)", $user_id, $target, RCM_DB::now() ) );
+		$blocked = $wpdb->query( $wpdb->prepare( "INSERT IGNORE INTO {$t} (user_id,blocked_user_id,created_at) VALUES (%d,%d,%s)", $user_id, $target, RCM_DB::now() ) );
+		if ( false === $blocked ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not block the user.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'user_blocked', 'user', $target );
 		return rest_ensure_response( array( 'blocked' => true ) );
 	}
 
-	public static function unblock_user( WP_REST_Request $request ): WP_REST_Response {
+	public static function unblock_user( WP_REST_Request $request ): WP_REST_Response|WP_Error {
 		$user_id = get_current_user_id();
 		$target  = absint( $request['user_id'] );
 		global $wpdb;
-		$wpdb->delete( RCM_DB::table( 'blocks' ), array( 'user_id' => $user_id, 'blocked_user_id' => $target ), array( '%d', '%d' ) );
+		if ( false === $wpdb->delete( RCM_DB::table( 'blocks' ), array( 'user_id' => $user_id, 'blocked_user_id' => $target ), array( '%d', '%d' ) ) ) {
+			return new WP_Error( 'rcm_db_error', __( 'Could not unblock the user.', 'rolechat-messenger' ), array( 'status' => 500 ) );
+		}
 		RCM_DB::audit( $user_id, 'user_unblocked', 'user', $target );
 		return rest_ensure_response( array( 'blocked' => false ) );
 	}

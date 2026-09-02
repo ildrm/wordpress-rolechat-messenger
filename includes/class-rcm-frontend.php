@@ -27,20 +27,7 @@ final class RCM_Frontend {
 			'currentUserId' => get_current_user_id(),
 			'pollInterval'  => max( 2000, (int) $settings['poll_interval_ms'] ),
 			'accent'        => sanitize_hex_color( $settings['frontend_widget_accent'] ) ?: '#229ED9',
-			'labels'        => array(
-				'loading' => __( 'Loading messages…', 'rolechat-messenger' ), 'noConversations' => __( 'No conversations yet.', 'rolechat-messenger' ),
-				'newMessage' => __( 'New message', 'rolechat-messenger' ), 'newChat' => __( 'New chat', 'rolechat-messenger' ), 'newGroup' => __( 'New group', 'rolechat-messenger' ),
-				'contacts' => __( 'Contacts', 'rolechat-messenger' ), 'archived' => __( 'Archived', 'rolechat-messenger' ), 'search' => __( 'Search', 'rolechat-messenger' ),
-				'typeMessage' => __( 'Write a message…', 'rolechat-messenger' ), 'send' => __( 'Send', 'rolechat-messenger' ), 'attach' => __( 'Attach', 'rolechat-messenger' ),
-				'typing' => __( 'typing…', 'rolechat-messenger' ), 'online' => __( 'Online', 'rolechat-messenger' ), 'away' => __( 'Away', 'rolechat-messenger' ),
-				'busy' => __( 'Busy', 'rolechat-messenger' ), 'dnd' => __( 'Do not disturb', 'rolechat-messenger' ), 'offline' => __( 'Offline', 'rolechat-messenger' ),
-				'reply' => __( 'Reply', 'rolechat-messenger' ), 'edit' => __( 'Edit', 'rolechat-messenger' ), 'delete' => __( 'Delete', 'rolechat-messenger' ), 'report' => __( 'Report', 'rolechat-messenger' ),
-				'pin' => __( 'Pin', 'rolechat-messenger' ), 'unpin' => __( 'Unpin', 'rolechat-messenger' ), 'archive' => __( 'Archive', 'rolechat-messenger' ), 'unarchive' => __( 'Unarchive', 'rolechat-messenger' ),
-				'mute' => __( 'Mute', 'rolechat-messenger' ), 'unmute' => __( 'Unmute', 'rolechat-messenger' ), 'groupInfo' => __( 'Group info', 'rolechat-messenger' ),
-				'addMember' => __( 'Add member', 'rolechat-messenger' ), 'leaveGroup' => __( 'Leave group', 'rolechat-messenger' ), 'addContact' => __( 'Add contact', 'rolechat-messenger' ),
-				'removeContact' => __( 'Remove contact', 'rolechat-messenger' ), 'block' => __( 'Block user', 'rolechat-messenger' ), 'error' => __( 'Something went wrong.', 'rolechat-messenger' ),
-				'messageDeleted' => __( 'Message deleted', 'rolechat-messenger' ), 'edited' => __( 'edited', 'rolechat-messenger' ), 'selectConversation' => __( 'Select a conversation.', 'rolechat-messenger' ),
-			),
+			'labels'        => RCM_Admin::js_labels(),
 		) );
 		wp_add_inline_style( 'rcm-frontend', ':root{--rcm-accent:' . esc_attr( sanitize_hex_color( $settings['frontend_widget_accent'] ) ?: '#229ED9' ) . ';}' );
 	}

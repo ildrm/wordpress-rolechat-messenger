@@ -117,7 +117,7 @@ final class RCM_Permissions {
 		return (bool) array_intersect( self::user_roles( $user_id ), (array) $settings['group_creator_roles'] );
 	}
 
-	public static function can_send_to_conversation( int $user_id, int $conversation_id, bool $attachment = false ): bool {
+	public static function can_send_to_conversation( int $user_id, int $conversation_id, bool $attachment = false, bool $text = true ): bool {
 		if ( ! self::can_use_chat( $user_id ) || ! RCM_DB::is_member( $conversation_id, $user_id ) ) {
 			return false;
 		}
@@ -130,8 +130,10 @@ final class RCM_Permissions {
 			return false;
 		}
 		foreach ( $others as $other_id ) {
-			$allowed = $attachment ? self::can_attach_to_user( $user_id, (int) $other_id ) : self::can_reply_to_user( $user_id, (int) $other_id );
-			if ( ! $allowed ) {
+			if ( $text && ! self::can_reply_to_user( $user_id, (int) $other_id ) ) {
+				return false;
+			}
+			if ( $attachment && ! self::can_attach_to_user( $user_id, (int) $other_id ) ) {
 				return false;
 			}
 		}
@@ -178,10 +180,14 @@ final class RCM_Permissions {
 			: new WP_Error( 'rcm_forbidden', __( 'You are not allowed to moderate chat.', 'rolechat-messenger' ), array( 'status' => 403 ) );
 	}
 
-	public static function rate_limit_ok( int $user_id ): bool {
+	public static function rate_limit_ok( int $user_id, string $bucket = 'message', ?int $limit_override = null ): bool {
+		if ( $user_id <= 0 ) {
+			return false;
+		}
 		$settings = self::settings();
-		$limit    = max( 1, (int) $settings['rate_limit_per_minute'] );
-		$key      = 'rcm_rate_' . $user_id;
+		$limit    = max( 1, null === $limit_override ? (int) $settings['rate_limit_per_minute'] : $limit_override );
+		$bucket   = sanitize_key( $bucket ) ?: 'message';
+		$key      = 'rcm_rate_' . $bucket . '_' . $user_id;
 		$data     = get_transient( $key );
 		$now      = time();
 		if ( ! is_array( $data ) || empty( $data['start'] ) || ( $now - (int) $data['start'] ) >= 60 ) {

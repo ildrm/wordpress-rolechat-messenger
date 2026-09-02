@@ -3,7 +3,23 @@
 defined( 'ABSPATH' ) || exit;
 
 final class RCM_Activator {
-	public static function activate(): void {
+	public static function activate( bool $network_wide = false ): void {
+		if ( $network_wide && is_multisite() ) {
+			foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0 ) ) as $site_id ) {
+				switch_to_blog( (int) $site_id );
+				try {
+					self::activate_site();
+				} finally {
+					restore_current_blog();
+				}
+			}
+			return;
+		}
+
+		self::activate_site();
+	}
+
+	private static function activate_site(): void {
 		self::install_schema();
 		self::install_capabilities();
 		self::ensure_attachment_secret();
@@ -13,9 +29,7 @@ final class RCM_Activator {
 		}
 		update_option( 'rcm_db_version', RCM_DB_VERSION, false );
 
-		if ( ! wp_next_scheduled( 'rcm_daily_cleanup' ) ) {
-			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'rcm_daily_cleanup' );
-		}
+		self::ensure_cleanup_schedule();
 	}
 
 	public static function ensure_attachment_secret(): void {
@@ -24,7 +38,11 @@ final class RCM_Activator {
 			return;
 		}
 
-		$secret = base64_encode( random_bytes( 32 ) );
+		try {
+			$secret = base64_encode( random_bytes( 32 ) );
+		} catch ( Throwable $e ) {
+			return;
+		}
 		// add_option() avoids overwriting a secret if concurrent activation requests race.
 		add_option( 'rcm_attachment_secret', $secret, '', false );
 	}
@@ -39,10 +57,30 @@ final class RCM_Activator {
 		return is_string( $decoded ) && 32 === strlen( $decoded ) ? $decoded : '';
 	}
 
-	public static function deactivate(): void {
-		$timestamp = wp_next_scheduled( 'rcm_daily_cleanup' );
-		if ( $timestamp ) {
-			wp_unschedule_event( $timestamp, 'rcm_daily_cleanup' );
+	public static function deactivate( bool $network_wide = false ): void {
+		if ( $network_wide && is_multisite() ) {
+			foreach ( get_sites( array( 'fields' => 'ids', 'number' => 0 ) ) as $site_id ) {
+				switch_to_blog( (int) $site_id );
+				try {
+					self::deactivate_site();
+				} finally {
+					restore_current_blog();
+				}
+			}
+			return;
+		}
+
+		self::deactivate_site();
+	}
+
+	private static function deactivate_site(): void {
+		wp_clear_scheduled_hook( 'rcm_daily_cleanup' );
+		wp_clear_scheduled_hook( 'rcm_cleanup_continuation' );
+	}
+
+	public static function ensure_cleanup_schedule(): void {
+		if ( ! wp_next_scheduled( 'rcm_daily_cleanup' ) ) {
+			wp_schedule_event( time() + HOUR_IN_SECONDS, 'daily', 'rcm_daily_cleanup' );
 		}
 	}
 
@@ -130,6 +168,7 @@ final class RCM_Activator {
 		$sql[] = "CREATE TABLE {$a} (
 			id bigint(20) unsigned NOT NULL AUTO_INCREMENT,
 			message_id bigint(20) unsigned NOT NULL DEFAULT 0,
+			conversation_id bigint(20) unsigned NOT NULL DEFAULT 0,
 			attachment_id bigint(20) unsigned NOT NULL DEFAULT 0,
 			uploader_id bigint(20) unsigned NOT NULL DEFAULT 0,
 			storage_key varchar(64) NOT NULL DEFAULT '',
@@ -139,6 +178,7 @@ final class RCM_Activator {
 			created_at datetime NOT NULL,
 			PRIMARY KEY  (id),
 			KEY message_id (message_id),
+			KEY conversation_id (conversation_id),
 			KEY uploader_pending (uploader_id,message_id),
 			KEY storage_key (storage_key),
 			KEY attachment_id (attachment_id)
@@ -264,6 +304,7 @@ final class RCM_Activator {
 			'max_attachment_mb'              => 10,
 			'allowed_extensions'             => 'jpg,jpeg,png,gif,webp,pdf,doc,docx,xls,xlsx,ppt,pptx,zip,txt,csv',
 			'rate_limit_per_minute'          => 30,
+			'upload_rate_limit_per_minute'   => 10,
 			'retention_days'                 => 0,
 			'admin_can_read_all'             => false,
 			'frontend_widget_position'       => 'right',
